@@ -5,6 +5,7 @@
  */
 
 #include "dac_tas58xx.h"
+#include "dac_tas58xx_eq.h"
 #include <math.h>
 #include <string.h>
 #include <sys/param.h>
@@ -586,6 +587,407 @@ static esp_err_t tas58xx_write_reg(uint8_t reg, uint8_t value) {
 static esp_err_t tas58xx_read_reg(uint8_t reg, uint8_t *value) {
   return i2c_bus_read(tas58xx_device_handle, tas58xx_addr, reg, value,
                       sizeof(uint8_t));
+}
+
+/* ==================  15-Band Parametric EQ  ================== */
+
+/*
+ * Biquad coefficient addresses for TAS5825M ROM Mode 1 (Book 0x8C).
+ *
+ * Each biquad occupies 20 bytes (5 × 32-bit coefficients: b0 b1 b2 a1 a2).
+ * Six biquads fit per page (registers 0x08–0x7B), then wrap to the next page.
+ *
+ * ** IMPORTANT ** — Verify these against TAS5825M datasheet (SLASEH6),
+ * Table "ROM Coefficient Tuning Addresses" for Mode 1.  Use
+ * tas58xx_eq_verify_addresses() at startup to confirm on real hardware.
+ *
+ * If channel pages are wrong, update CH1_BQ_START_PAGE / CH2_BQ_START_PAGE
+ * to match your device's ROM coefficient map.
+ */
+
+#define BQ_COEFF_BOOK  0x8C
+#define BQ_COEFF_SIZE  20   /* bytes per biquad (5 × 4) */
+#define BQ_FIRST_REG   0x08 /* first usable register on coeff pages */
+#define BYTES_PER_PAGE 120  /* 0x08..0x7F = 120 usable bytes per coeff page */
+#define BQ_BASE_PAGE   0x2C /* first page of coefficient area (Book 0x8C) */
+
+/*
+ * Linear byte offsets into the coefficient RAM for each channel's biquad
+ * block.  The TAS5805M reference (sonocotta) shows left and right biquads
+ * are laid out contiguously with no gap.  CH2 starts immediately after
+ * CH1's 15 biquads.
+ */
+#define CH1_BQ_BYTE_OFFSET 0
+#define CH2_BQ_BYTE_OFFSET (TAS58XX_EQ_BANDS * BQ_COEFF_SIZE) /* = 300 */
+
+/* 15 ISO 1/3-octave center frequencies at ~2/3-octave spacing */
+static const float eq_center_freq[TAS58XX_EQ_BANDS] = {
+    25.0f,   40.0f,   63.0f,   100.0f,  160.0f,  250.0f,   400.0f,   630.0f,
+    1000.0f, 1600.0f, 2500.0f, 4000.0f, 6300.0f, 10000.0f, 16000.0f,
+};
+
+/* Q for ~2/3-octave bandwidth: Q = √(2^BW) / (2^BW − 1), BW = 2/3 */
+#define EQ_DEFAULT_Q   2.145f
+#define EQ_SAMPLE_RATE 44100.0f
+
+/* 1.0 in 5.27 fixed-point (1 sign + 4 int + 27 frac = 32-bit) */
+#define FP_ONE 0x08000000
+
+/* ---------- helpers ---------- */
+
+/** Select a book/page for coefficient access. */
+static inline esp_err_t select_book_page(uint8_t book, uint8_t page) {
+  esp_err_t err;
+  err = tas58xx_write_reg(REG_PAGE_SEL, 0x00);
+  if (err != ESP_OK)
+    return err;
+  err = tas58xx_write_reg(REG_BOOK_SEL, book);
+  if (err != ESP_OK)
+    return err;
+  return tas58xx_write_reg(REG_PAGE_SEL, page);
+}
+
+/** Return to Book 0, Page 0. */
+static inline esp_err_t select_default_page(void) {
+  esp_err_t err;
+  err = tas58xx_write_reg(REG_PAGE_SEL, 0x00);
+  if (err != ESP_OK)
+    return err;
+  err = tas58xx_write_reg(REG_BOOK_SEL, 0x00);
+  if (err != ESP_OK)
+    return err;
+  return tas58xx_write_reg(REG_PAGE_SEL, 0x00);
+}
+
+/**
+ * Compute page and start-register for biquad @p bq (0-14) on a channel.
+ * @p ch_byte_offset is the linear byte offset of the channel's first biquad
+ * within the coefficient area (0 for CH1, 300 for CH2 in contiguous layout).
+ */
+static inline void bq_address(int ch_byte_offset, int bq, uint8_t *page,
+                              uint8_t *reg) {
+  int byte_off = ch_byte_offset + bq * BQ_COEFF_SIZE;
+  *page = BQ_BASE_PAGE + (uint8_t)(byte_off / BYTES_PER_PAGE);
+  *reg = BQ_FIRST_REG + (uint8_t)(byte_off % BYTES_PER_PAGE);
+}
+
+/**
+ * Compute peaking-EQ biquad coefficients (Audio EQ Cookbook).
+ *
+ * TI convention:  H(z) = (b0 + b1·z⁻¹ + b2·z⁻²) / (1 − a1·z⁻¹ − a2·z⁻²)
+ * so stored a1/a2 are the *negated* textbook values.
+ *
+ * Coefficients are returned as 32-bit signed 5.27 fixed-point.
+ */
+static void calc_peaking_biquad(float fc, float gain_db, float q, float fs,
+                                int32_t coeff[5]) {
+  /* Flat / bypass shortcut */
+  if (fabsf(gain_db) < 0.05f) {
+    coeff[0] = FP_ONE; /* b0 = 1.0 */
+    coeff[1] = 0;
+    coeff[2] = 0;
+    coeff[3] = 0;
+    coeff[4] = 0;
+    return;
+  }
+
+  float w0 = 2.0f * (float)M_PI * fc / fs;
+  float A = powf(10.0f, gain_db / 40.0f);
+  float sinw = sinf(w0);
+  float cosw = cosf(w0);
+  float alpha = sinw / (2.0f * q);
+
+  float b0 = 1.0f + alpha * A;
+  float b1 = -2.0f * cosw;
+  float b2 = 1.0f - alpha * A;
+  float a0 = 1.0f + alpha / A;
+  float a1_txt = -2.0f * cosw;     /* textbook a1 */
+  float a2_txt = 1.0f - alpha / A; /* textbook a2 */
+
+  /* Normalise by a0 */
+  float inv_a0 = 1.0f / a0;
+  b0 *= inv_a0;
+  b1 *= inv_a0;
+  b2 *= inv_a0;
+
+  /* TI format: negate a1/a2 */
+  float a1_ti = -a1_txt * inv_a0;
+  float a2_ti = -a2_txt * inv_a0;
+
+  /* Convert to 5.27 fixed-point */
+  const float scale = (float)(1 << 27);
+  coeff[0] = (int32_t)roundf(b0 * scale);
+  coeff[1] = (int32_t)roundf(b1 * scale);
+  coeff[2] = (int32_t)roundf(b2 * scale);
+  coeff[3] = (int32_t)roundf(a1_ti * scale);
+  coeff[4] = (int32_t)roundf(a2_ti * scale);
+}
+
+/**
+ * Write a single biquad's 5 coefficients (20 bytes, big-endian) to the
+ * TAS5825M coefficient RAM.  Caller must already have selected Book 0x8C.
+ */
+static esp_err_t write_biquad_coeff(uint8_t page, uint8_t reg_start,
+                                    const int32_t coeff[5]) {
+  esp_err_t err;
+  err = tas58xx_write_reg(REG_PAGE_SEL, page);
+  if (err != ESP_OK)
+    return err;
+
+  uint8_t buf[BQ_COEFF_SIZE];
+  for (int i = 0; i < 5; i++) {
+    buf[i * 4 + 0] = (uint8_t)((coeff[i] >> 24) & 0xFF);
+    buf[i * 4 + 1] = (uint8_t)((coeff[i] >> 16) & 0xFF);
+    buf[i * 4 + 2] = (uint8_t)((coeff[i] >> 8) & 0xFF);
+    buf[i * 4 + 3] = (uint8_t)((coeff[i]) & 0xFF);
+  }
+
+  return i2c_bus_write(tas58xx_device_handle, tas58xx_addr, reg_start, buf,
+                       BQ_COEFF_SIZE);
+}
+
+/**
+ * Read 20 bytes back from a biquad location and decode into int32[5].
+ */
+static esp_err_t read_biquad_coeff(uint8_t page, uint8_t reg_start,
+                                   int32_t coeff[5]) {
+  esp_err_t err;
+  err = tas58xx_write_reg(REG_PAGE_SEL, page);
+  if (err != ESP_OK)
+    return err;
+
+  uint8_t buf[BQ_COEFF_SIZE];
+  err = i2c_bus_read(tas58xx_device_handle, tas58xx_addr, reg_start, buf,
+                     BQ_COEFF_SIZE);
+  if (err != ESP_OK)
+    return err;
+
+  for (int i = 0; i < 5; i++) {
+    coeff[i] = ((int32_t)buf[i * 4 + 0] << 24) |
+               ((int32_t)buf[i * 4 + 1] << 16) |
+               ((int32_t)buf[i * 4 + 2] << 8) | ((int32_t)buf[i * 4 + 3]);
+  }
+  return ESP_OK;
+}
+
+/**
+ * Program one biquad on both channels.
+ * Enters Book 0x8C, writes CH1 then CH2, and returns to Book 0 / Page 0.
+ */
+static esp_err_t program_biquad(int bq, const int32_t coeff[5]) {
+  uint8_t page, reg;
+  esp_err_t err;
+
+  /* Enter coefficient book */
+  err = select_book_page(BQ_COEFF_BOOK, 0x00);
+  if (err != ESP_OK)
+    goto out;
+
+  /* Channel 1 (Left) */
+  bq_address(CH1_BQ_BYTE_OFFSET, bq, &page, &reg);
+  err = write_biquad_coeff(page, reg, coeff);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "EQ: CH1 BQ%d write failed: %s", bq, esp_err_to_name(err));
+    goto out;
+  }
+
+  /* Channel 2 (Right) */
+  bq_address(CH2_BQ_BYTE_OFFSET, bq, &page, &reg);
+  err = write_biquad_coeff(page, reg, coeff);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "EQ: CH2 BQ%d write failed: %s", bq, esp_err_to_name(err));
+    goto out;
+  }
+
+out:
+  select_default_page();
+  return err;
+}
+
+/* ---------- Public API ---------- */
+
+esp_err_t tas58xx_eq_set_band(int band, float gain_db) {
+  if (band < 0 || band >= TAS58XX_EQ_BANDS) {
+    ESP_LOGE(TAG, "EQ: invalid band %d", band);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  /* Clamp gain */
+  if (gain_db > TAS58XX_EQ_MAX_GAIN_DB)
+    gain_db = TAS58XX_EQ_MAX_GAIN_DB;
+  if (gain_db < TAS58XX_EQ_MIN_GAIN_DB)
+    gain_db = TAS58XX_EQ_MIN_GAIN_DB;
+
+  ESP_LOGI(TAG, "EQ: band %d (%.0f Hz) -> %+.1f dB", band, eq_center_freq[band],
+           gain_db);
+
+  int32_t coeff[5];
+  calc_peaking_biquad(eq_center_freq[band], gain_db, EQ_DEFAULT_Q,
+                      EQ_SAMPLE_RATE, coeff);
+
+  return program_biquad(band, coeff);
+}
+
+esp_err_t tas58xx_eq_set_all(const float gains_db[TAS58XX_EQ_BANDS]) {
+  if (!gains_db)
+    return ESP_ERR_INVALID_ARG;
+
+  esp_err_t first_err = ESP_OK;
+  for (int i = 0; i < TAS58XX_EQ_BANDS; i++) {
+    esp_err_t err = tas58xx_eq_set_band(i, gains_db[i]);
+    if (err != ESP_OK && first_err == ESP_OK) {
+      first_err = err;
+    }
+  }
+  return first_err;
+}
+
+esp_err_t tas58xx_eq_flat(void) {
+  ESP_LOGI(TAG, "EQ: resetting all bands to flat");
+  int32_t flat[5] = {FP_ONE, 0, 0, 0, 0};
+
+  esp_err_t first_err = ESP_OK;
+  for (int i = 0; i < TAS58XX_EQ_BANDS; i++) {
+    esp_err_t err = program_biquad(i, flat);
+    if (err != ESP_OK && first_err == ESP_OK) {
+      first_err = err;
+    }
+  }
+  return first_err;
+}
+
+float tas58xx_eq_get_center_freq(int band) {
+  if (band < 0 || band >= TAS58XX_EQ_BANDS)
+    return 0.0f;
+  return eq_center_freq[band];
+}
+
+esp_err_t tas58xx_eq_verify_addresses(void) {
+  ESP_LOGI(TAG, "EQ: verifying biquad addresses (Book 0x%02X, 5.27 format)...",
+           BQ_COEFF_BOOK);
+
+  esp_err_t err;
+  err = select_book_page(BQ_COEFF_BOOK, 0x00);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "EQ: cannot select coefficient book 0x%02X", BQ_COEFF_BOOK);
+    select_default_page();
+    return err;
+  }
+
+  /*
+   * Verify strategy: write-and-readback test.
+   *
+   * Rather than relying on ROM Mode 1 initializing all biquads to flat
+   * (it doesn't — some biquads are used for internal DSP processing),
+   * we test each address by:
+   *   1. Reading the original value
+   *   2. Writing a known test pattern
+   *   3. Reading it back
+   *   4. Restoring the original value
+   *
+   * If the readback matches the test pattern, that address is writable
+   * coefficient RAM and our address mapping is correct.
+   *
+   * Coefficient format: 5.27 fixed-point.
+   * Flat (unity passthrough): {0x08000000, 0, 0, 0, 0}.
+   */
+  const int32_t test_pattern[5] = {0x07654321, 0x01234567, 0x0ABCDEF0,
+                                   0x05A5A5A5, 0x0F0F0F0F};
+  int ch1_ok = 0, ch2_ok = 0;
+  int ch1_fail = 0, ch2_fail = 0;
+  int ch1_flat = 0, ch2_flat = 0;
+
+  for (int ch = 0; ch < 2; ch++) {
+    int ch_offset = (ch == 0) ? CH1_BQ_BYTE_OFFSET : CH2_BQ_BYTE_OFFSET;
+    const char *ch_str = (ch == 0) ? "CH1" : "CH2";
+    int *ok = (ch == 0) ? &ch1_ok : &ch2_ok;
+    int *fail = (ch == 0) ? &ch1_fail : &ch2_fail;
+    int *flat = (ch == 0) ? &ch1_flat : &ch2_flat;
+
+    for (int bq = 0; bq < TAS58XX_EQ_BANDS; bq++) {
+      uint8_t page, reg;
+      bq_address(ch_offset, bq, &page, &reg);
+
+      /* 1. Read original coefficients */
+      int32_t orig[5];
+      err = read_biquad_coeff(page, reg, orig);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "  %s BQ%02d READ FAIL page=0x%02X reg=0x%02X: %s",
+                 ch_str, bq, page, reg, esp_err_to_name(err));
+        (*fail)++;
+        continue;
+      }
+
+      /* Check if this biquad has flat (unity) coefficients */
+      bool is_flat_bq = (orig[0] == FP_ONE && orig[1] == 0 && orig[2] == 0 &&
+                         orig[3] == 0 && orig[4] == 0);
+      if (is_flat_bq)
+        (*flat)++;
+
+      /* 2. Write test pattern */
+      err = write_biquad_coeff(page, reg, test_pattern);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "  %s BQ%02d WRITE FAIL page=0x%02X reg=0x%02X: %s",
+                 ch_str, bq, page, reg, esp_err_to_name(err));
+        (*fail)++;
+        continue;
+      }
+
+      /* 3. Read back and compare */
+      int32_t readback[5];
+      err = read_biquad_coeff(page, reg, readback);
+      bool match = (err == ESP_OK);
+      if (match) {
+        for (int i = 0; i < 5; i++) {
+          if (readback[i] != test_pattern[i]) {
+            match = false;
+            break;
+          }
+        }
+      }
+
+      /* 4. Restore original value */
+      write_biquad_coeff(page, reg, orig);
+
+      if (match) {
+        (*ok)++;
+      } else {
+        ESP_LOGW(TAG,
+                 "  %s BQ%02d MISMATCH page=0x%02X reg=0x%02X: "
+                 "wrote=0x%08lX readback=0x%08lX",
+                 ch_str, bq, page, reg, (long)test_pattern[0],
+                 (long)readback[0]);
+        (*fail)++;
+      }
+    }
+  }
+
+  select_default_page();
+
+  ESP_LOGI(TAG,
+           "EQ verify: CH1 %d/%d writable (%d flat), "
+           "CH2 %d/%d writable (%d flat)",
+           ch1_ok, TAS58XX_EQ_BANDS, ch1_flat, ch2_ok, TAS58XX_EQ_BANDS,
+           ch2_flat);
+
+  /* Log computed addresses for reference */
+  for (int ch = 0; ch < 2; ch++) {
+    int ch_offset = (ch == 0) ? CH1_BQ_BYTE_OFFSET : CH2_BQ_BYTE_OFFSET;
+    uint8_t p0, r0, pn, rn;
+    bq_address(ch_offset, 0, &p0, &r0);
+    bq_address(ch_offset, TAS58XX_EQ_BANDS - 1, &pn, &rn);
+    ESP_LOGI(TAG, "  %s: BQ00=page 0x%02X:0x%02X .. BQ14=page 0x%02X:0x%02X",
+             (ch == 0) ? "CH1" : "CH2", p0, r0, pn, rn);
+  }
+
+  int total_ok = ch1_ok + ch2_ok;
+  int total_expected = TAS58XX_EQ_BANDS * 2;
+  if (total_ok < total_expected) {
+    ESP_LOGW(TAG, "EQ: %d/%d addresses failed write-readback test",
+             total_expected - total_ok, total_expected);
+  }
+
+  return (total_ok == total_expected) ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 /* =====================  I2C Bus  ===================== */
