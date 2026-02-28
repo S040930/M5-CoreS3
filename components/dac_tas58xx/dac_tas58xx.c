@@ -103,29 +103,35 @@ struct tas58xx_cmd_s {
  *   8. Set volume ramp rates
  *   9. Configure auto-mute
  *  10. Clear faults
- *  11. Transition to Play state
+ *
+ * NOTE: We do NOT transition to Play here — I2S clocks are not yet
+ * running when dac_init() is called, so the PLL cannot lock and the
+ * device will stay stuck in HiZ.  The transition to Play happens
+ * later via dac_set_power_mode(DAC_POWER_ON) once I2S is active.
  */
 static const struct tas58xx_cmd_s tas58xx_init_seq[] = {
-    {REG_PAGE_SEL, 0x00},          // Select Book 0 Page 0
-    {REG_BOOK_SEL, 0x00},          // Select Book 0
-    {REG_PAGE_SEL, 0x00},          // Confirm Page 0
-    {REG_RESET_CTRL, RESET_REG},   // Reset control port registers
+    {REG_PAGE_SEL, 0x00},        // Select Book 0 Page 0
+    {REG_BOOK_SEL, 0x00},        // Select Book 0
+    {REG_PAGE_SEL, 0x00},        // Confirm Page 0
+    {REG_RESET_CTRL, RESET_REG}, // Reset control port registers
 
     // Go to HiZ with DSP enabled (DIS_DSP=0, CTRL_STATE=HiZ)
     {REG_DEVICE_CTRL2, CTRL2_HIZ},
 
     // I2S format: standard I2S, 16-bit word length
-    {REG_SAP_CTRL1, 0x00},        // DATA_FORMAT=I2S(00), WORD_LENGTH=16bit(00)
+    {REG_SAP_CTRL1, 0x00}, // DATA_FORMAT=I2S(00), WORD_LENGTH=16bit(00)
 
-    // Clock detection: ignore missing SCLK during init
-    {REG_CLOCK_DET_CTRL, 0x0C},   // Ignore SCLK halt + missing
+    // Clock detection: re-enable detection (0x00 = detect all errors)
+    // The PLL needs valid SCLK to lock; masking errors just hides the
+    // problem.  We stay in HiZ here anyway, so faults are expected.
+    {REG_CLOCK_DET_CTRL, 0x00},
 
     // DSP: ROM mode 1 (default passthrough)
     {REG_DSP_PGM_MODE, 0x01},
-    {REG_DSP_CTRL, 0x01},         // Use default coefficients
+    {REG_DSP_CTRL, 0x01}, // Use default coefficients
 
     // Volume ramp: smooth transitions
-    {REG_DIG_VOL_CTRL1, 0x33},    // Default ramp rates
+    {REG_DIG_VOL_CTRL1, 0x33}, // Default ramp rates
 
     // Auto-mute: enable for both channels
     {REG_AUTO_MUTE_CTRL, 0x07},
@@ -140,10 +146,9 @@ static const struct tas58xx_cmd_s tas58xx_init_seq[] = {
     // Analog gain: 0 dB
     {REG_AGAIN, 0x00},
 
-    // Unmute and go to Play
-    {REG_DEVICE_CTRL2, CTRL2_PLAY},
+    // Stay in HiZ — transition to Play deferred to set_power_mode()
 
-    {0xFF, 0xFF}                   // End of table sentinel
+    {0xFF, 0xFF} // End of table sentinel
 };
 
 /* ---------- State ---------- */
@@ -191,8 +196,128 @@ static uint8_t tas58xx_detect(i2c_master_bus_handle_t bus) {
 
 /* ---------- DAC ops implementation ---------- */
 
+/**
+ * Read and log all diagnostic registers.
+ * Call after init or any power state change to verify DAC status.
+ */
+static void tas58xx_dump_status(const char *context) {
+  uint8_t val = 0;
+
+  ESP_LOGI(TAG, "--- %s: TAS5825M status dump ---", context);
+
+  if (tas58xx_read_reg(REG_DEVICE_CTRL2, &val) == ESP_OK) {
+    const char *state_str;
+    switch (val & CTRL2_STATE_MASK) {
+    case CTRL2_DEEP_SLEEP:
+      state_str = "DEEP_SLEEP";
+      break;
+    case CTRL2_SLEEP:
+      state_str = "SLEEP";
+      break;
+    case CTRL2_HIZ:
+      state_str = "HIZ";
+      break;
+    case CTRL2_PLAY:
+      state_str = "PLAY";
+      break;
+    default:
+      state_str = "UNKNOWN";
+      break;
+    }
+    ESP_LOGI(TAG, "  DEVICE_CTRL2=0x%02X  state=%s  mute=%s  dsp=%s", val,
+             state_str, (val & CTRL2_MUTE) ? "YES" : "no",
+             (val & CTRL2_DIS_DSP) ? "DISABLED" : "enabled");
+  }
+
+  if (tas58xx_read_reg(REG_POWER_STATE, &val) == ESP_OK) {
+    const char *ps_str;
+    switch (val) {
+    case 0x00:
+      ps_str = "DEEP_SLEEP";
+      break;
+    case 0x01:
+      ps_str = "SLEEP";
+      break;
+    case 0x02:
+      ps_str = "HIZ";
+      break;
+    case 0x03:
+      ps_str = "PLAY";
+      break;
+    default:
+      ps_str = "UNKNOWN";
+      break;
+    }
+    ESP_LOGI(TAG, "  POWER_STATE=0x%02X (%s)", val, ps_str);
+  }
+
+  if (tas58xx_read_reg(REG_SAP_CTRL1, &val) == ESP_OK) {
+    const char *fmt_str;
+    switch ((val >> 4) & 0x03) {
+    case 0:
+      fmt_str = "I2S";
+      break;
+    case 1:
+      fmt_str = "TDM/DSP";
+      break;
+    case 2:
+      fmt_str = "RJ";
+      break;
+    case 3:
+      fmt_str = "LJ";
+      break;
+    default:
+      fmt_str = "?";
+      break;
+    }
+    int wlen = 16 + ((val >> 0) & 0x03) * 8; // 00=16, 01=20, 10=24, 11=32
+    ESP_LOGI(TAG, "  SAP_CTRL1=0x%02X  format=%s  word_len=%d-bit", val,
+             fmt_str, wlen);
+  }
+
+  if (tas58xx_read_reg(REG_DIG_VOL, &val) == ESP_OK) {
+    float db = (0x30 - (int)val) * 0.5f;
+    ESP_LOGI(TAG, "  DIG_VOL=0x%02X (%.1f dB%s)", val, db,
+             val == DIG_VOL_MUTE ? " MUTED" : "");
+  }
+
+  if (tas58xx_read_reg(REG_AGAIN, &val) == ESP_OK) {
+    float again_db = -(val & 0x1F) * 0.5f;
+    ESP_LOGI(TAG, "  AGAIN=0x%02X (%.1f dB)", val, again_db);
+  }
+
+  if (tas58xx_read_reg(REG_AUTO_MUTE_CTRL, &val) == ESP_OK) {
+    ESP_LOGI(TAG, "  AUTO_MUTE_CTRL=0x%02X", val);
+  }
+
+  uint8_t chan_fault = 0, global1 = 0, global2 = 0, warning = 0;
+  tas58xx_read_reg(REG_CHAN_FAULT, &chan_fault);
+  tas58xx_read_reg(REG_GLOBAL_FAULT1, &global1);
+  tas58xx_read_reg(REG_GLOBAL_FAULT2, &global2);
+  tas58xx_read_reg(REG_WARNING, &warning);
+  if (chan_fault || global1 || global2 || warning) {
+    ESP_LOGW(TAG,
+             "  FAULTS: chan=0x%02X global1=0x%02X global2=0x%02X warn=0x%02X",
+             chan_fault, global1, global2, warning);
+  } else {
+    ESP_LOGI(TAG, "  FAULTS: none");
+  }
+
+  if (tas58xx_read_reg(REG_DSP_PGM_MODE, &val) == ESP_OK) {
+    ESP_LOGI(TAG, "  DSP_PGM_MODE=0x%02X", val);
+  }
+  if (tas58xx_read_reg(REG_DSP_CTRL, &val) == ESP_OK) {
+    ESP_LOGI(TAG, "  DSP_CTRL=0x%02X", val);
+  }
+
+  ESP_LOGI(TAG, "--- end status dump ---");
+}
+
 static esp_err_t tas58xx_init(void) {
   esp_err_t err;
+
+  ESP_LOGI(TAG, "Initializing TAS5825M (I2C SDA=%d SCL=%d)", CONFIG_DAC_I2C_SDA,
+           CONFIG_DAC_I2C_SCL);
 
   // Set up I2C bus
   err = i2c_init(0, CONFIG_DAC_I2C_SDA, CONFIG_DAC_I2C_SCL);
@@ -204,7 +329,7 @@ static esp_err_t tas58xx_init(void) {
   // Detect device
   tas58xx_addr = tas58xx_detect(s_bus_handle);
   if (!tas58xx_addr) {
-    ESP_LOGW(TAG, "No TAS5825M detected");
+    ESP_LOGE(TAG, "No TAS5825M detected on I2C bus!");
     return ESP_ERR_NOT_FOUND;
   }
 
@@ -217,46 +342,47 @@ static esp_err_t tas58xx_init(void) {
   // Verify die ID
   uint8_t die_id = 0;
   err = tas58xx_read_reg(REG_DIE_ID, &die_id);
-  if (err == ESP_OK && die_id != TAS5825M_DIE_ID) {
-    ESP_LOGW(TAG, "Unexpected die ID: 0x%02X (expected 0x%02X)", die_id,
-             TAS5825M_DIE_ID);
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "Die ID: 0x%02X %s", die_id,
+             (die_id == TAS5825M_DIE_ID) ? "(OK)" : "(UNEXPECTED!)");
+  } else {
+    ESP_LOGE(TAG, "Failed to read die ID: %s", esp_err_to_name(err));
   }
 
   // Run init sequence
+  ESP_LOGI(TAG, "Running init sequence...");
   for (int i = 0; tas58xx_init_seq[i].reg != 0xFF; i++) {
     err = tas58xx_write_reg(tas58xx_init_seq[i].reg,
                             tas58xx_init_seq[i].value);
     if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Init failed at reg 0x%02X: %s", tas58xx_init_seq[i].reg,
+      ESP_LOGE(TAG, "Init failed at step %d: reg 0x%02X val 0x%02X: %s", i,
+               tas58xx_init_seq[i].reg, tas58xx_init_seq[i].value,
                esp_err_to_name(err));
       return err;
     }
+    ESP_LOGD(TAG, "  [%02d] reg 0x%02X <- 0x%02X", i, tas58xx_init_seq[i].reg,
+             tas58xx_init_seq[i].value);
 
     // Pause after HiZ transition to let clocks settle
     if (tas58xx_init_seq[i].reg == REG_DEVICE_CTRL2 &&
         (tas58xx_init_seq[i].value & CTRL2_STATE_MASK) == CTRL2_HIZ) {
+      ESP_LOGD(TAG, "  Waiting 10 ms for HiZ clock settle");
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-  }
 
-  // Verify we're in play state
-  uint8_t power_state = 0;
-  err = tas58xx_read_reg(REG_POWER_STATE, &power_state);
-  if (err == ESP_OK) {
-    ESP_LOGI(TAG, "TAS5825M power state: %d (3=Play)", power_state);
+    // Pause after DSP configuration before going to PLAY
+    if (tas58xx_init_seq[i].reg == REG_DSP_CTRL) {
+      ESP_LOGD(TAG, "  Waiting 5 ms for DSP settle");
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
   }
+  ESP_LOGI(TAG, "Init sequence complete");
 
-  // Check for faults
-  uint8_t chan_fault = 0, global1 = 0, global2 = 0;
-  tas58xx_read_reg(REG_CHAN_FAULT, &chan_fault);
-  tas58xx_read_reg(REG_GLOBAL_FAULT1, &global1);
-  tas58xx_read_reg(REG_GLOBAL_FAULT2, &global2);
-  if (chan_fault || global1 || global2) {
-    ESP_LOGW(TAG, "Faults after init: chan=0x%02X global1=0x%02X global2=0x%02X",
-             chan_fault, global1, global2);
-    // Clear them
-    tas58xx_write_reg(REG_FAULT_CLEAR, 0x80);
-  }
+  // Give the device time to reach PLAY state
+  vTaskDelay(pdMS_TO_TICKS(10));
+
+  // Dump full status after init
+  tas58xx_dump_status("post-init");
 
   ESP_LOGI(TAG, "TAS5825M initialized at I2C addr 0x%02X", tas58xx_addr);
   return ESP_OK;
@@ -281,24 +407,76 @@ static esp_err_t tas58xx_deinit(void) {
 }
 
 static void tas58xx_set_power_mode(dac_power_mode_t mode) {
-  uint8_t ctrl2_val;
-
+  const char *mode_str;
   switch (mode) {
   case DAC_POWER_ON:
-    ctrl2_val = CTRL2_PLAY;
+    mode_str = "ON(PLAY)";
     break;
   case DAC_POWER_STANDBY:
-    ctrl2_val = CTRL2_HIZ;
+    mode_str = "STANDBY(HIZ)";
     break;
   case DAC_POWER_OFF:
-    ctrl2_val = CTRL2_DEEP_SLEEP;
+    mode_str = "OFF(DEEP_SLEEP)";
     break;
   default:
     ESP_LOGW(TAG, "Unhandled power mode %d", mode);
     return;
   }
 
-  tas58xx_write_reg(REG_DEVICE_CTRL2, ctrl2_val);
+  // Read current state for logging
+  uint8_t cur_ctrl2 = 0;
+  tas58xx_read_reg(REG_DEVICE_CTRL2, &cur_ctrl2);
+  ESP_LOGI(TAG, "Power mode -> %s (DEVICE_CTRL2 was 0x%02X)", mode_str,
+           cur_ctrl2);
+
+  uint8_t cur_state = cur_ctrl2 & CTRL2_STATE_MASK;
+
+  if (mode == DAC_POWER_ON) {
+    // Always go through HIZ first (per datasheet §9.5.3.1)
+    // The PLL needs valid I2S clocks to lock — they must be present
+    // by the time this function is called.
+    if (cur_state != CTRL2_HIZ) {
+      ESP_LOGI(TAG, "Transitioning to HIZ first (from state %d)", cur_state);
+      tas58xx_write_reg(REG_DEVICE_CTRL2, CTRL2_HIZ);
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // Clear any faults accumulated while clocks were absent
+    tas58xx_write_reg(REG_FAULT_CLEAR, 0x80);
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // Request transition to PLAY (unmuted)
+    ESP_LOGI(TAG, "Requesting PLAY...");
+    tas58xx_write_reg(REG_DEVICE_CTRL2, CTRL2_PLAY);
+
+    // Poll POWER_STATE until the device actually reaches PLAY.
+    // The TAS5825M won't transition until its PLL locks on SCLK.
+    uint8_t ps = 0;
+    bool reached_play = false;
+    for (int attempt = 0; attempt < 50; attempt++) { // up to ~500 ms
+      vTaskDelay(pdMS_TO_TICKS(10));
+      if (tas58xx_read_reg(REG_POWER_STATE, &ps) == ESP_OK && ps == 0x03) {
+        ESP_LOGI(TAG, "Reached PLAY state after %d ms", (attempt + 1) * 10);
+        reached_play = true;
+        break;
+      }
+    }
+    if (!reached_play) {
+      ESP_LOGE(TAG,
+               "FAILED to reach PLAY — POWER_STATE=0x%02X "
+               "(is I2S providing BCLK/WS on GPIO %d/%d?)",
+               ps, CONFIG_I2S_BCK_IO, CONFIG_I2S_WS_IO);
+    }
+
+    // Clear any faults from PLAY transition
+    tas58xx_write_reg(REG_FAULT_CLEAR, 0x80);
+
+    tas58xx_dump_status("power-on");
+  } else if (mode == DAC_POWER_STANDBY) {
+    tas58xx_write_reg(REG_DEVICE_CTRL2, CTRL2_HIZ);
+  } else {
+    tas58xx_write_reg(REG_DEVICE_CTRL2, CTRL2_DEEP_SLEEP);
+  }
 }
 
 static void tas58xx_enable_speaker(bool enable) {
@@ -310,6 +488,9 @@ static void tas58xx_enable_speaker(bool enable) {
     ESP_LOGE(TAG, "Failed to read DEVICE_CTRL2");
     return;
   }
+
+  ESP_LOGI(TAG, "Speaker %s (DEVICE_CTRL2 was 0x%02X)",
+           enable ? "ENABLE" : "DISABLE", val);
 
   if (enable) {
     val &= ~CTRL2_MUTE;  // Clear mute bit
@@ -378,7 +559,7 @@ static void tas58xx_set_volume(float volume_airplay_db) {
     reg_val = (uint8_t)raw;
   }
 
-  ESP_LOGD(TAG, "Volume: AirPlay %.1f dB -> DAC %.1f dB -> reg 0x%02X",
+  ESP_LOGI(TAG, "Volume: AirPlay %.1f dB -> DAC %.1f dB -> reg 0x%02X",
            volume_airplay_db, db_level, reg_val);
 
   tas58xx_write_reg(REG_DIG_VOL, reg_val);
