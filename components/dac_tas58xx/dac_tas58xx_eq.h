@@ -34,7 +34,7 @@
 #define TAS58XX_EQ_BANDS 15
 
 /** Gain limits per band (dB) */
-#define TAS58XX_EQ_MAX_GAIN_DB  12.0f
+#define TAS58XX_EQ_MAX_GAIN_DB 12.0f
 #define TAS58XX_EQ_MIN_GAIN_DB -12.0f
 
 /**
