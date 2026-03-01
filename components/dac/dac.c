@@ -13,8 +13,8 @@ void dac_register(const dac_ops_t *ops) {
   s_ops = ops;
 }
 
-esp_err_t dac_init(void) {
-  return (s_ops && s_ops->init) ? s_ops->init() : ESP_OK;
+esp_err_t dac_init(void *i2c_bus) {
+  return (s_ops && s_ops->init) ? s_ops->init(i2c_bus) : ESP_OK;
 }
 
 esp_err_t dac_deinit(void) {

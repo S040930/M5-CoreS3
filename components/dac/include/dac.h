@@ -14,7 +14,7 @@ typedef enum {
  * NULL function pointers are treated as no-ops.
  */
 typedef struct {
-  esp_err_t (*init)(void);
+  esp_err_t (*init)(void *i2c_bus);
   esp_err_t (*deinit)(void);
   void (*set_volume)(float volume_db);
   void (*set_power_mode)(dac_power_mode_t mode);
@@ -28,9 +28,12 @@ typedef struct {
 void dac_register(const dac_ops_t *ops);
 
 /**
- * Initialize the registered DAC driver
+ * Initialize the registered DAC driver.
+ *
+ * @param i2c_bus  I2C master bus handle (may be NULL if the driver
+ *                 does not use an externally-provided bus)
  */
-esp_err_t dac_init(void);
+esp_err_t dac_init(void *i2c_bus);
 
 /**
  * Deinitialize the DAC

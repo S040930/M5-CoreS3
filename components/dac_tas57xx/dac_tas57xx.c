@@ -77,22 +77,19 @@ static esp_err_t write_cmd(tas57xx_cmd_e cmd, ...);
 static int tas57xx_detect(i2c_master_bus_handle_t s_bus_handle);
 
 // I2C functions
-static esp_err_t i2c_init(int i2c_port, int sda_io, int scl_io);
-static esp_err_t i2c_deinit(int i2c_port, int sda_io, int scl_i);
 static esp_err_t i2c_bus_write(i2c_master_dev_handle_t dev, uint8_t addr,
                                uint8_t reg, const uint8_t *data, size_t len);
 static esp_err_t i2c_bus_add_device(uint8_t addr,
                                     i2c_master_dev_handle_t *dev_handle);
 static esp_err_t i2c_bus_remove_device(i2c_master_dev_handle_t dev_handle);
 
-static esp_err_t tas57xx_init(void) {
+static esp_err_t tas57xx_init(void *i2c_bus) {
   esp_err_t err = ESP_OK;
 
-  // Set up I2C (always uses port 0)
-  err = i2c_init(0, CONFIG_DAC_I2C_SDA, CONFIG_DAC_I2C_SCL);
-  if (ESP_OK != err) {
-    ESP_LOGE(TAG, "Could not configure i2c bus: %d", err);
-    return err;
+  s_bus_handle = (i2c_master_bus_handle_t)i2c_bus;
+  if (s_bus_handle == NULL) {
+    ESP_LOGE(TAG, "No I2C bus handle provided");
+    return ESP_ERR_INVALID_ARG;
   }
   // Detect TAS57xx chip
   tas57xx_addr = tas57xx_detect(s_bus_handle);
@@ -134,9 +131,10 @@ static esp_err_t tas57xx_deinit(void) {
       ESP_LOGE(TAG, "failed to remove from i2c bus, err: %s",
                esp_err_to_name(err));
     }
+    tas57xx_device_handle = NULL;
   }
 
-  err = i2c_deinit(0, CONFIG_DAC_I2C_SDA, CONFIG_DAC_I2C_SCL);
+  s_bus_handle = NULL;
   return err;
 }
 
@@ -271,51 +269,6 @@ static int tas57xx_detect(i2c_master_bus_handle_t s_bus_handle) {
 }
 
 ////////////////////////  I2C Bus ///////////////////////
-
-/**
- * Initialize the bus
- */
-static esp_err_t i2c_init(int i2c_port, int sda_io, int scl_io) {
-  esp_err_t err = ESP_OK;
-
-  if (s_bus_handle != NULL) {
-    ESP_LOGW(TAG, "i2c already initialized");
-    return err;
-  }
-  if (sda_io < 0 || scl_io < 0) {
-    ESP_LOGW(TAG, "Invalid i2c pins: sda=%d, scl=%d", sda_io, scl_io);
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  i2c_master_bus_config_t i2c_config = {.i2c_port = i2c_port,
-                                        .sda_io_num = sda_io,
-                                        .scl_io_num = scl_io,
-                                        .clk_source = I2C_CLK_SRC_DEFAULT,
-                                        .glitch_ignore_cnt = 7,
-                                        .flags.enable_internal_pullup = true};
-
-  err = i2c_new_master_bus(&i2c_config, &s_bus_handle);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to initialize i2c master bus: %s",
-             esp_err_to_name(err));
-    s_bus_handle = NULL;
-    return err;
-  }
-  ESP_LOGI(TAG, "i2c bus %d initialized: sda=%d, scl=%d", i2c_port, sda_io,
-           scl_io);
-
-  return err;
-}
-
-static esp_err_t i2c_deinit(int i2c_port, int sda_io, int scl_io) {
-  esp_err_t err = ESP_OK;
-
-  if (s_bus_handle != NULL) {
-    err = i2c_del_master_bus(s_bus_handle);
-    s_bus_handle = NULL;
-  }
-  return err;
-}
 
 static esp_err_t i2c_bus_add_device(uint8_t addr,
                                     i2c_master_dev_handle_t *dev_handle) {

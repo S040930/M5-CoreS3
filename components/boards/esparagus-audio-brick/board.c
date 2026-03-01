@@ -13,6 +13,7 @@
 #include "dac_tas58xx.h"
 #include "dac_tas58xx_eq.h"
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "eq_events.h"
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -35,6 +36,7 @@ static const char TAG[] = "EsparagusBrick";
 static bool s_board_initialized = false;
 static TaskHandle_t gpio_task_handle = NULL;
 static volatile bool speaker_fault_active = false;
+static i2c_master_bus_handle_t s_i2c_bus_handle = NULL;
 
 static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
                           void *user_data);
@@ -52,8 +54,12 @@ bool iot_board_is_init(void) {
 }
 
 board_res_handle_t iot_board_get_handle(int id) {
-  (void)id;
-  return NULL;
+  switch (id) {
+  case BOARD_I2C0_ID:
+    return (board_res_handle_t)s_i2c_bus_handle;
+  default:
+    return NULL;
+  }
 }
 
 // Speaker fault ISR — notifies the handler task, no I2C calls from ISR
@@ -111,7 +117,25 @@ esp_err_t iot_board_init(void) {
 
   // Register and initialize DAC
   dac_register(&dac_tas58xx_ops);
-  esp_err_t err = dac_init();
+
+  // Initialize I2C bus (board owns the bus lifetime)
+  i2c_master_bus_config_t i2c_cfg = {
+      .i2c_port = BOARD_I2C_PORT,
+      .sda_io_num = BOARD_I2C_SDA_GPIO,
+      .scl_io_num = BOARD_I2C_SCL_GPIO,
+      .clk_source = I2C_CLK_SRC_DEFAULT,
+      .glitch_ignore_cnt = 7,
+      .flags.enable_internal_pullup = true,
+  };
+  esp_err_t err = i2c_new_master_bus(&i2c_cfg, &s_i2c_bus_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize I2C bus: %s", esp_err_to_name(err));
+    return err;
+  }
+  ESP_LOGI(TAG, "I2C bus %d initialized: sda=%d, scl=%d", BOARD_I2C_PORT,
+           BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO);
+
+  err = dac_init(s_i2c_bus_handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize DAC: %s", esp_err_to_name(err));
     return err;
@@ -160,6 +184,12 @@ esp_err_t iot_board_deinit(void) {
 
   dac_enable_speaker(false);
   dac_set_power_mode(DAC_POWER_OFF);
+
+  // Tear down I2C bus (after DAC is deinitialized)
+  if (s_i2c_bus_handle != NULL) {
+    i2c_del_master_bus(s_i2c_bus_handle);
+    s_i2c_bus_handle = NULL;
+  }
 
   s_board_initialized = false;
   return ESP_OK;
