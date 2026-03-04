@@ -89,8 +89,9 @@ static void draw_scroll_separator(u8g2_t *u8g2, int x, int y) {
  */
 static void draw_scrolling_line(u8g2_t *u8g2, int idx, int y, const char *str,
                                 int max_w) {
-  if (!str || !str[0])
+  if (!str || !str[0]) {
     return;
+  }
 
   int text_w = u8g2_GetUTF8Width(u8g2, str);
 
