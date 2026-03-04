@@ -73,7 +73,7 @@ GPIO14           →  GND             Software ground (pulled low by code)
 Or GND           →  GND             Ground (GPIO14 software ground is sufficient)
 ```
 
-### *⚠️ **Important:** On the ESP32S3 board, bridge the VIN/VOUT solder pads if they are not already connected. This lets the board use 5V power directly.*
+### _⚠️ **Important:** On the ESP32S3 board, bridge the VIN/VOUT solder pads if they are not already connected. This lets the board use 5V power directly._
 
 ### Step 3 — Check the result
 
@@ -304,7 +304,7 @@ SPI mode exposes additional GPIO settings for CLK, MOSI, CS, DC, and RST.
 | LCK    | Word select — toggles at 44.1 kHz     |
 | DIN    | Serial audio data (16-bit stereo)     |
 
-MCLK is not used; the PCM5102A generates it internally.
+MCLK is not used for PCM5102A as generates it internally. It is, however, connected to pin 8 by default: this is useful in case you want to wire up some other kind of signal converter, like WM8805 I2S to SPDIF converter.
 
 ### Protocol Stack
 
