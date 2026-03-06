@@ -133,6 +133,8 @@ esp_err_t ethernet_init(void) {
   esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
   if (mac == NULL) {
     ESP_LOGE(TAG, "Failed to create W5500 MAC");
+    esp_netif_destroy(s_eth_netif);
+    s_eth_netif = NULL;
     return ESP_FAIL;
   }
 
@@ -142,6 +144,9 @@ esp_err_t ethernet_init(void) {
   esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
   if (phy == NULL) {
     ESP_LOGE(TAG, "Failed to create W5500 PHY");
+    mac->del(mac);
+    esp_netif_destroy(s_eth_netif);
+    s_eth_netif = NULL;
     return ESP_FAIL;
   }
 
@@ -150,6 +155,10 @@ esp_err_t ethernet_init(void) {
   ret = esp_eth_driver_install(&eth_config, &s_eth_handle);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Ethernet driver install failed: %s", esp_err_to_name(ret));
+    phy->del(phy);
+    mac->del(mac);
+    esp_netif_destroy(s_eth_netif);
+    s_eth_netif = NULL;
     return ret;
   }
 
@@ -197,7 +206,10 @@ esp_err_t ethernet_get_ip_str(char *ip_str, size_t len) {
 }
 
 void ethernet_get_mac_str(char *mac_str, size_t len) {
-  if (!s_eth_handle || !mac_str || len == 0) {
+  if (!mac_str || len == 0) {
+    return;
+  }
+  if (!s_eth_handle) {
     mac_str[0] = '\0';
     return;
   }

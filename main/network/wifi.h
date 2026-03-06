@@ -12,20 +12,6 @@
 void wifi_init_apsta(const char *ap_ssid, const char *ap_password);
 
 /**
- * Initialize WiFi in AP-only mode (for configuration portal).
- * STA will not attempt to connect. Call wifi_start_sta() later if needed.
- * @param ap_ssid AP SSID (if NULL, uses default)
- * @param ap_password AP password (if NULL, uses default or open)
- */
-void wifi_init_ap_only(const char *ap_ssid, const char *ap_password);
-
-/**
- * Enable STA mode and connect to saved WiFi credentials.
- * Can be called after wifi_init_ap_only() to add STA functionality.
- */
-void wifi_start_sta(void);
-
-/**
  * Block until WiFi is connected and has an IP address
  * @param timeout_ms Timeout in milliseconds (0 = wait forever)
  * @return true if connected, false if timeout

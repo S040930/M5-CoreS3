@@ -33,7 +33,7 @@ You only need 2 boards and a few wires. Everything is available on AliExpress / 
 
 | Component                | What to search for                                                      | Price |
 | ------------------------ | ----------------------------------------------------------------------- | ----- |
-| **ESP32-S3 dev board**   | "ESP32-S3 N16R8" (must have **MB PSRAM**)                              | ~5$   |
+| **ESP32-S3 dev board**   | "ESP32-S3 N16R8" (must have **8MB PSRAM**)                              | ~5$   |
 | **PCM5102A DAC board**   | "PCM5102A I2S DAC" (the small purple board with 3.5mm jack)             | ~3$   |
 | **Female 2.54mm header** | "Female pin header 2.54mm single row" (1x6 or longer, then cut to size) | ~0.5$ |
 

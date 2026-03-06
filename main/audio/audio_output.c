@@ -146,7 +146,11 @@ void audio_output_stop(void) {
   while (playback_task_handle != NULL && timeout-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(50));
   }
-  ESP_LOGI(TAG, "Playback task stopped");
+  if (playback_task_handle != NULL) {
+    ESP_LOGW(TAG, "Playback task did not exit within timeout");
+  } else {
+    ESP_LOGI(TAG, "Playback task stopped");
+  }
 }
 
 esp_err_t audio_output_write(const void *data, size_t bytes, TickType_t wait) {
@@ -155,6 +159,9 @@ esp_err_t audio_output_write(const void *data, size_t bytes, TickType_t wait) {
 }
 
 void audio_output_set_sample_rate(uint32_t rate) {
+  // Only safe to call when no writer task is actively using I2S
+  // (AirPlay playback task must be stopped, BT calls this before
+  // the I2S writer task starts consuming data)
   ESP_LOGI(TAG, "Setting sample rate to %" PRIu32 " Hz", rate);
   i2s_channel_disable(tx_handle);
   i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate);

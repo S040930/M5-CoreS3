@@ -134,7 +134,11 @@ static bool bt_app_work_dispatch(bt_app_cb_t cb, uint16_t event, void *param,
     }
     memcpy(msg.param, param, (size_t)param_len);
   }
-  return bt_app_send_msg(&msg);
+  if (!bt_app_send_msg(&msg)) {
+    free(msg.param);
+    return false;
+  }
+  return true;
 }
 
 static void bt_app_task(void *arg) {
@@ -382,6 +386,7 @@ static void bt_a2dp_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
 
 static void bt_avrc_ct_evt_handler(uint16_t event, void *param) {
   esp_avrc_ct_cb_param_t *rc = (esp_avrc_ct_cb_param_t *)param;
+  static rtsp_event_data_t meta_data;
 
   switch (event) {
   case ESP_AVRC_CT_CONNECTION_STATE_EVT:
@@ -409,7 +414,6 @@ static void bt_avrc_ct_evt_handler(uint16_t event, void *param) {
     }
 
     // Build metadata event for display
-    static rtsp_event_data_t meta_data;
     char *dst = NULL;
     size_t dst_size = 0;
 
@@ -449,9 +453,8 @@ static void bt_avrc_ct_evt_handler(uint16_t event, void *param) {
   case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
     if (rc->change_ntf.event_id == ESP_AVRC_RN_TRACK_CHANGE) {
       ESP_LOGI(TAG, "Track changed");
-      // Clear old metadata
-      static rtsp_event_data_t empty_meta;
-      memset(&empty_meta, 0, sizeof(empty_meta));
+      // Clear old metadata so stale fields don't persist
+      memset(&meta_data, 0, sizeof(meta_data));
 
       // Request new metadata
       esp_avrc_ct_send_metadata_cmd(
