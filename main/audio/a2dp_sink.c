@@ -94,6 +94,7 @@ typedef enum {
 static bt_a2dp_state_cb_t s_state_cb = NULL;
 static volatile bool s_connected = false;
 static volatile bool s_audio_started = false;
+static volatile bool s_avrc_playing = false; /* AVRCP play state (instant) */
 static volatile bool s_i2s_task_running = false;
 static bool s_bt_discoverable = true;
 static uint8_t s_avrc_volume = 127; /* 0-127, AVRCP absolute volume */
@@ -308,6 +309,7 @@ static void bt_a2dp_evt_handler(uint16_t event, void *param) {
       ESP_LOGI(TAG, "A2DP disconnected");
       s_connected = false;
       s_audio_started = false;
+      s_avrc_playing = false;
 
       // Stop BT playback
       i2s_task_stop();
@@ -397,19 +399,29 @@ static void bt_avrc_ct_evt_handler(uint16_t event, void *param) {
       esp_avrc_ct_send_metadata_cmd(
           0, ESP_AVRC_MD_ATTR_TITLE | ESP_AVRC_MD_ATTR_ARTIST |
                  ESP_AVRC_MD_ATTR_ALBUM | ESP_AVRC_MD_ATTR_GENRE);
-      // Register for track change notification
+      // Request current play status (duration + position + play state)
+      esp_avrc_ct_send_get_play_status_cmd(0);
+      // Register for notifications: track change, play status, position
       esp_avrc_ct_send_register_notification_cmd(1, ESP_AVRC_RN_TRACK_CHANGE,
                                                  0);
+      esp_avrc_ct_send_register_notification_cmd(2,
+                                                 ESP_AVRC_RN_PLAY_STATUS_CHANGE,
+                                                 0);
+      esp_avrc_ct_send_register_notification_cmd(3,
+                                                 ESP_AVRC_RN_PLAY_POS_CHANGED,
+                                                 10); // report every 10 seconds
     }
     break;
 
   case ESP_AVRC_CT_METADATA_RSP_EVT: {
-    // Metadata response — one attribute per event
+    // Metadata response — one attribute per event.
+    // attr_text was deep-copied in bt_avrc_ct_cb and must be freed here.
     uint8_t attr_id = rc->meta_rsp.attr_id;
     uint8_t *text = rc->meta_rsp.attr_text;
     int len = rc->meta_rsp.attr_length;
 
     if (text == NULL || len == 0) {
+      free(text);
       break;
     }
 
@@ -447,6 +459,37 @@ static void bt_avrc_ct_evt_handler(uint16_t event, void *param) {
       // Emit metadata event after each attribute update
       rtsp_events_emit(RTSP_EVENT_METADATA, &meta_data);
     }
+    free(text);
+    break;
+  }
+
+  case ESP_AVRC_CT_PLAY_STATUS_RSP_EVT: {
+    uint32_t duration_ms = rc->play_status_rsp.song_length;
+    uint32_t position_ms = rc->play_status_rsp.song_position;
+    esp_avrc_playback_stat_t status = rc->play_status_rsp.play_status;
+
+    ESP_LOGI(TAG, "Play status: state=%d pos=%lums dur=%lums",
+             status, (unsigned long)position_ms, (unsigned long)duration_ms);
+
+    // Update duration and position in metadata for display
+    // 0xFFFFFFFF means "not available" per AVRCP spec
+    if (duration_ms != 0xFFFFFFFF) {
+      meta_data.metadata.duration_secs = duration_ms / 1000;
+    }
+    if (position_ms != 0xFFFFFFFF) {
+      meta_data.metadata.position_secs = position_ms / 1000;
+    }
+    rtsp_events_emit(RTSP_EVENT_METADATA, &meta_data);
+
+    // Emit play state from AVRCP (faster than A2D audio state)
+    if (status == ESP_AVRC_PLAYBACK_PLAYING) {
+      s_avrc_playing = true;
+      rtsp_events_emit(RTSP_EVENT_PLAYING, NULL);
+    } else if (status == ESP_AVRC_PLAYBACK_PAUSED ||
+               status == ESP_AVRC_PLAYBACK_STOPPED) {
+      s_avrc_playing = false;
+      rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
+    }
     break;
   }
 
@@ -456,13 +499,45 @@ static void bt_avrc_ct_evt_handler(uint16_t event, void *param) {
       // Clear old metadata so stale fields don't persist
       memset(&meta_data, 0, sizeof(meta_data));
 
-      // Request new metadata
+      // Request new metadata and play status
       esp_avrc_ct_send_metadata_cmd(
           0, ESP_AVRC_MD_ATTR_TITLE | ESP_AVRC_MD_ATTR_ARTIST |
                  ESP_AVRC_MD_ATTR_ALBUM | ESP_AVRC_MD_ATTR_GENRE);
+      esp_avrc_ct_send_get_play_status_cmd(0);
       // Re-register for track change
       esp_avrc_ct_send_register_notification_cmd(1, ESP_AVRC_RN_TRACK_CHANGE,
                                                  0);
+    } else if (rc->change_ntf.event_id == ESP_AVRC_RN_PLAY_STATUS_CHANGE) {
+      esp_avrc_playback_stat_t status = rc->change_ntf.event_parameter.playback;
+      ESP_LOGI(TAG, "Play status changed: %d", status);
+
+      // Refresh position/duration from source
+      esp_avrc_ct_send_get_play_status_cmd(0);
+
+      if (status == ESP_AVRC_PLAYBACK_PLAYING) {
+        s_avrc_playing = true;
+        rtsp_events_emit(RTSP_EVENT_PLAYING, NULL);
+      } else if (status == ESP_AVRC_PLAYBACK_PAUSED ||
+                 status == ESP_AVRC_PLAYBACK_STOPPED) {
+        s_avrc_playing = false;
+        rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
+      }
+      // Re-register
+      esp_avrc_ct_send_register_notification_cmd(2,
+                                                 ESP_AVRC_RN_PLAY_STATUS_CHANGE,
+                                                 0);
+    } else if (rc->change_ntf.event_id == ESP_AVRC_RN_PLAY_POS_CHANGED) {
+      uint32_t pos_ms = rc->change_ntf.event_parameter.play_pos;
+      ESP_LOGD(TAG, "Play position: %lums", (unsigned long)pos_ms);
+
+      if (pos_ms != 0xFFFFFFFF) {
+        meta_data.metadata.position_secs = pos_ms / 1000;
+        rtsp_events_emit(RTSP_EVENT_METADATA, &meta_data);
+      }
+      // Re-register
+      esp_avrc_ct_send_register_notification_cmd(3,
+                                                 ESP_AVRC_RN_PLAY_POS_CHANGED,
+                                                 10);
     }
     break;
 
@@ -473,7 +548,23 @@ static void bt_avrc_ct_evt_handler(uint16_t event, void *param) {
 
 static void bt_avrc_ct_cb(esp_avrc_ct_cb_event_t event,
                           esp_avrc_ct_cb_param_t *param) {
-  bt_app_work_dispatch(bt_avrc_ct_evt_handler, (uint16_t)event, param,
+  esp_avrc_ct_cb_param_t local = *param;
+
+  // Deep-copy attr_text for metadata responses — the BT stack frees the
+  // original buffer after this callback returns, so the shallow copy done
+  // by bt_app_work_dispatch would leave a dangling pointer.
+  if (event == ESP_AVRC_CT_METADATA_RSP_EVT && param->meta_rsp.attr_text &&
+      param->meta_rsp.attr_length > 0) {
+    uint8_t *copy = malloc((size_t)param->meta_rsp.attr_length + 1);
+    if (copy) {
+      memcpy(copy, param->meta_rsp.attr_text,
+             (size_t)param->meta_rsp.attr_length);
+      copy[param->meta_rsp.attr_length] = '\0';
+      local.meta_rsp.attr_text = copy;
+    }
+  }
+
+  bt_app_work_dispatch(bt_avrc_ct_evt_handler, (uint16_t)event, &local,
                        sizeof(esp_avrc_ct_cb_param_t));
 }
 
@@ -740,11 +831,13 @@ static void send_passthrough(uint8_t key_code) {
 }
 
 void bt_a2dp_send_playpause(void) {
-  // Use PLAY or PAUSE based on current A2DP audio state
-  // PAUSE key code = 0x46, PLAY = 0x44
-  // Use the toggle-friendly approach: send PAUSE if playing, PLAY if not
-  send_passthrough(ESP_AVRC_PT_CMD_PAUSE);
-  ESP_LOGI(TAG, "AVRCP: play/pause");
+  if (s_avrc_playing) {
+    send_passthrough(ESP_AVRC_PT_CMD_PAUSE);
+    ESP_LOGI(TAG, "AVRCP: pause");
+  } else {
+    send_passthrough(ESP_AVRC_PT_CMD_PLAY);
+    ESP_LOGI(TAG, "AVRCP: play");
+  }
 }
 
 void bt_a2dp_send_next(void) {

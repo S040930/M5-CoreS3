@@ -2,9 +2,9 @@
  * Source-agnostic playback controller.
  *
  * For AirPlay 2:
- *   - Volume: adjust locally (DAC + NVS persistence)
- *   - Play/Pause: control audio_receiver locally (TCP back-pressure
- *     throttles the source). The phone UI won't reflect the pause.
+ *   - Play/Pause: mute/unmute the DAC (stream keeps running to avoid
+ *     buffering issues — there is no way to tell the source to pause).
+ *   - Volume: adjust locally (DAC + NVS persistence).
  *   - Next/Prev: not possible without the MediaRemote protocol.
  *   DACP calls are kept as best-effort for AirPlay 1 connections.
  *
@@ -15,7 +15,6 @@
 
 #include "playback_control.h"
 
-#include "audio_receiver.h"
 #include "dac.h"
 #include "dacp_client.h"
 #include "rtsp_events.h"
@@ -35,6 +34,8 @@ static const char *TAG = "playback_ctrl";
 #define VOLUME_MAX_DB  0.0f
 
 static playback_source_t s_source = PLAYBACK_SOURCE_NONE;
+static bool s_muted = false;
+static float s_pre_mute_db = 0.0f;
 
 esp_err_t playback_control_init(void) {
   dacp_init();
@@ -43,6 +44,7 @@ esp_err_t playback_control_init(void) {
 }
 
 void playback_control_set_source(playback_source_t source) {
+  s_muted = false;
   s_source = source;
   ESP_LOGI(TAG, "Source set to %d", source);
 }
@@ -71,8 +73,6 @@ static float db_to_dacp_percent(float db) {
 }
 
 static void airplay_adjust_volume(float step_db) {
-  // Read current volume from the RTSP server's connection
-  // We use airplay_set_volume which handles Q15 conversion + NVS persistence
   float current_db;
   if (settings_get_volume(&current_db) != ESP_OK) {
     current_db = 0.0f;
@@ -80,12 +80,19 @@ static void airplay_adjust_volume(float step_db) {
 
   float new_db = clamp_volume(current_db + step_db);
   airplay_set_volume(new_db);
-  dac_set_volume(new_db);
+
+  if (s_muted) {
+    // Update saved level so unmute restores the new volume
+    s_pre_mute_db = new_db;
+  } else {
+    dac_set_volume(new_db);
+  }
 
   // Notify AirPlay client via DACP
   dacp_send_volume(db_to_dacp_percent(new_db));
 
-  ESP_LOGI(TAG, "AirPlay volume: %.1f -> %.1f dB", current_db, new_db);
+  ESP_LOGI(TAG, "AirPlay volume: %.1f -> %.1f dB%s", current_db, new_db,
+           s_muted ? " (muted)" : "");
 }
 
 // ============================================================================
@@ -95,16 +102,23 @@ static void airplay_adjust_volume(float step_db) {
 void playback_control_play_pause(void) {
   switch (s_source) {
   case PLAYBACK_SOURCE_AIRPLAY: {
-    bool playing = audio_receiver_is_playing();
-    if (playing) {
-      audio_receiver_pause();
+    // Mute/unmute the DAC — the stream keeps running so there are no
+    // buffering or reconnection issues.
+    if (!s_muted) {
+      if (settings_get_volume(&s_pre_mute_db) != ESP_OK) {
+        s_pre_mute_db = 0.0f;
+      }
+      dac_set_volume(VOLUME_MIN_DB);
+      s_muted = true;
       rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
+      ESP_LOGI(TAG, "AirPlay muted (was %.1f dB)", s_pre_mute_db);
     } else {
-      audio_receiver_set_playing(true);
+      dac_set_volume(s_pre_mute_db);
+      s_muted = false;
       rtsp_events_emit(RTSP_EVENT_PLAYING, NULL);
+      ESP_LOGI(TAG, "AirPlay unmuted (%.1f dB)", s_pre_mute_db);
     }
-    dacp_send_playpause();
-    ESP_LOGI(TAG, "AirPlay %s", playing ? "paused" : "resumed");
+    dacp_send_playpause(); // Best-effort, AirPlay 1 only
     break;
   }
 #ifdef CONFIG_BT_A2DP_ENABLE
