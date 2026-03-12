@@ -7,7 +7,9 @@
  */
 
 #include "log_stream.h"
+#include "spiram_task.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "freertos/FreeRTOS.h"
@@ -27,7 +29,7 @@
 #define BROADCAST_INTERVAL_MS 100
 #define MAX_SEND_CHUNK 1024
 
-static char s_ring[LOG_RING_SIZE];
+static char *s_ring;
 static volatile size_t s_head; /* next write position  */
 static volatile size_t s_tail; /* next read position   */
 static SemaphoreHandle_t s_mutex;
@@ -170,6 +172,12 @@ esp_err_t log_stream_init(void) {
   s_mutex = xSemaphoreCreateMutex();
   if (!s_mutex) return ESP_ERR_NO_MEM;
 
+#ifdef CONFIG_SPIRAM
+  s_ring = heap_caps_malloc(LOG_RING_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if (!s_ring) s_ring = malloc(LOG_RING_SIZE);
+  if (!s_ring) return ESP_ERR_NO_MEM;
+
   s_head = s_tail = 0;
   s_client_count = 0;
 
@@ -195,7 +203,7 @@ esp_err_t log_stream_register(httpd_handle_t server) {
     return err;
   }
 
-  xTaskCreate(broadcast_task, "log_ws", BROADCAST_TASK_STACK, NULL, 3, NULL);
+  task_create_spiram(broadcast_task, "log_ws", BROADCAST_TASK_STACK, NULL, 3, NULL, NULL);
   ESP_LOGI("log_stream", "Log streaming on /ws/logs");
   return ESP_OK;
 }

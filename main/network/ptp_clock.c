@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 
 #include "ptp_clock.h"
+#include "spiram_task.h"
 
 static const char *TAG = "ptp_clock";
 
@@ -44,6 +45,7 @@ static const char *TAG = "ptp_clock";
 static struct {
   bool running;
   TaskHandle_t task_handle;
+  spiram_task_mem_t task_mem;
   int event_socket;
   int general_socket;
 
@@ -328,6 +330,9 @@ static void ptp_task(void *pvParameters) {
     int ret = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
 
     if (ret < 0) {
+      if (!ptp.running) {
+        break;  // Sockets closed during shutdown
+      }
       if (errno != EINTR) {
         ESP_LOGE(TAG, "select error: %d", errno);
       }
@@ -395,7 +400,8 @@ esp_err_t ptp_clock_init(void) {
   // Start task
   ptp.running = true;
   BaseType_t ret =
-      xTaskCreate(ptp_task, "ptp_clock", 4096, NULL, 6, &ptp.task_handle);
+      task_create_spiram(ptp_task, "ptp_clock", 4096, NULL, 6,
+                         &ptp.task_handle, &ptp.task_mem);
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "Failed to create PTP task");
     close(ptp.event_socket);
@@ -430,6 +436,7 @@ void ptp_clock_stop(void) {
   if (ptp.task_handle) {
     vTaskDelay(pdMS_TO_TICKS(200));
   }
+  task_free_spiram(&ptp.task_mem);
 }
 
 void ptp_clock_clear(void) {

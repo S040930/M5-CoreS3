@@ -15,8 +15,14 @@
 //   Bit 38: SupportsCoreUtilsPairingAndEncryption
 //   Bit 46: SupportsHKPairingAndAccessControl
 //   Bit 48: SupportsTransientPairing
+#ifdef CONFIG_AIRPLAY_FORCE_V1
+// AirPlay v1: strip pairing/encryption bits so iOS uses classic RAOP
+#define AIRPLAY_FEATURES_HI 0x0
+#define AIRPLAY_FEATURES_LO 0x5C4A00
+#else
 #define AIRPLAY_FEATURES_HI 0x1C340
 #define AIRPLAY_FEATURES_LO 0x405C4A00
+#endif
 
 // Audio buffer size for buffered streams (type 103)
 #define AP2_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)

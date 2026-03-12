@@ -1,8 +1,9 @@
 /**
  * DACP client — sends control commands to AirPlay source device.
  *
- * The client's DACP service is discovered via mDNS using the DACP-ID
- * from the RTSP handshake. Commands are fire-and-forget HTTP GETs.
+ * Works with both AirPlay 1 and AirPlay 2. The client's DACP service
+ * is discovered via mDNS using the DACP-ID from the RTSP handshake.
+ * Commands are fire-and-forget HTTP GETs.
  *
  * Thread safety: dacp_set_session/clear may be called from the RTSP
  * server task while dacp_send_* are called from the button task.
@@ -24,9 +25,11 @@
 
 static const char *TAG = "dacp";
 
-#define DACP_ID_MAX     32
-#define ACTIVE_REMOTE_MAX 32
-#define MDNS_TIMEOUT_MS 3000
+#define DACP_ID_MAX         32
+#define ACTIVE_REMOTE_MAX   32
+#define MDNS_TIMEOUT_MS     3000
+#define MDNS_RETRY_COUNT    2
+#define MDNS_RETRY_DELAY_MS 500
 
 static SemaphoreHandle_t s_mutex;
 static bool s_initialized;
@@ -43,38 +46,47 @@ static void discover_dacp_port(void) {
 
   s_dacp_port = 0;
 
-  // Query mDNS for _dacp._tcp services
-  mdns_result_t *results = NULL;
-  esp_err_t err =
-      mdns_query_ptr("_dacp", "_tcp", MDNS_TIMEOUT_MS, 8, &results);
-  if (err != ESP_OK || !results) {
-    ESP_LOGW(TAG, "mDNS DACP query failed or no results (err=%s)",
-             esp_err_to_name(err));
-    return;
-  }
+  for (int attempt = 0; attempt < MDNS_RETRY_COUNT && s_dacp_port == 0;
+       attempt++) {
+    if (attempt > 0) {
+      vTaskDelay(pdMS_TO_TICKS(MDNS_RETRY_DELAY_MS));
+      ESP_LOGI(TAG, "DACP mDNS retry %d/%d", attempt + 1, MDNS_RETRY_COUNT);
+    }
 
-  // Find the result matching our DACP-ID.
-  // iOS advertises as "iTunes_Ctrl_<DACPID>" or just "<DACPID>".
-  for (mdns_result_t *r = results; r; r = r->next) {
-    ESP_LOGI(TAG, "mDNS DACP service: instance='%s' port=%u",
-             r->instance_name ? r->instance_name : "(null)", r->port);
-    if (!r->instance_name || r->port == 0) {
+    // Query mDNS for _dacp._tcp services
+    mdns_result_t *results = NULL;
+    esp_err_t err =
+        mdns_query_ptr("_dacp", "_tcp", MDNS_TIMEOUT_MS, 8, &results);
+    if (err != ESP_OK || !results) {
+      ESP_LOGW(TAG, "mDNS DACP query failed or no results (err=%s)",
+               esp_err_to_name(err));
       continue;
     }
-    // Match: exact, or instance contains the DACP-ID as a substring
-    if (strcasecmp(r->instance_name, s_dacp_id) == 0 ||
-        strcasestr(r->instance_name, s_dacp_id) != NULL) {
-      s_dacp_port = r->port;
-      ESP_LOGI(TAG, "Matched DACP service: '%s' port %u",
-               r->instance_name, s_dacp_port);
-      break;
+
+    // Find the result matching our DACP-ID.
+    // iOS advertises as "iTunes_Ctrl_<DACPID>" or just "<DACPID>".
+    for (mdns_result_t *r = results; r; r = r->next) {
+      ESP_LOGI(TAG, "mDNS DACP service: instance='%s' port=%u",
+               r->instance_name ? r->instance_name : "(null)", r->port);
+      if (!r->instance_name || r->port == 0) {
+        continue;
+      }
+      // Match: exact, or instance contains the DACP-ID as a substring
+      if (strcasecmp(r->instance_name, s_dacp_id) == 0 ||
+          strcasestr(r->instance_name, s_dacp_id) != NULL) {
+        s_dacp_port = r->port;
+        ESP_LOGI(TAG, "Matched DACP service: '%s' port %u", r->instance_name,
+                 s_dacp_port);
+        break;
+      }
     }
+
+    mdns_query_results_free(results);
   }
 
-  mdns_query_results_free(results);
-
   if (s_dacp_port == 0) {
-    ESP_LOGW(TAG, "DACP service not found for ID '%s'", s_dacp_id);
+    ESP_LOGW(TAG, "DACP service not found for ID '%s' after %d attempts",
+             s_dacp_id, MDNS_RETRY_COUNT);
   }
 }
 
@@ -130,6 +142,10 @@ static void send_dacp_request(const char *path) {
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "DACP request failed: %s (%s)", path,
              esp_err_to_name(err));
+    // Connection failed — invalidate port so next command re-discovers
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_dacp_port = 0;
+    xSemaphoreGive(s_mutex);
   } else {
     int status = esp_http_client_get_status_code(client);
     ESP_LOGI(TAG, "DACP: %s -> %d", path, status);
@@ -194,6 +210,14 @@ void dacp_send_next(void) { send_dacp_request("nextitem"); }
 
 void dacp_send_prev(void) { send_dacp_request("previtem"); }
 
+void dacp_send_volume_up(void) {
+  send_dacp_request("volumeup");
+}
+
+void dacp_send_volume_down(void) {
+  send_dacp_request("volumedown");
+}
+
 void dacp_send_volume(float volume_percent) {
   if (volume_percent < 0.0f)
     volume_percent = 0.0f;
@@ -204,4 +228,16 @@ void dacp_send_volume(float volume_percent) {
   snprintf(path, sizeof(path), "setproperty?dmcp.volume=%.0f",
            volume_percent);
   send_dacp_request(path);
+}
+
+bool dacp_is_active(void) {
+  if (!s_initialized) {
+    return false;
+  }
+  bool active = false;
+  if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    active = s_session_valid;
+    xSemaphoreGive(s_mutex);
+  }
+  return active;
 }

@@ -15,6 +15,7 @@
  */
 
 #include "a2dp_sink.h"
+#include "spiram_task.h"
 
 #include "audio_output.h"
 #include "dac.h"
@@ -784,8 +785,9 @@ esp_err_t bt_a2dp_sink_init(const char *device_name,
     return ESP_ERR_NO_MEM;
   }
 
-  BaseType_t ret = xTaskCreate(bt_app_task, "bt_app", BT_TASK_STACK, NULL,
-                               BT_TASK_PRIO, &s_bt_task_handle);
+  BaseType_t ret = task_create_spiram(bt_app_task, "bt_app", BT_TASK_STACK,
+                                      NULL, BT_TASK_PRIO, &s_bt_task_handle,
+                                      NULL);
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "Failed to create BT app task");
     return ESP_ERR_NO_MEM;

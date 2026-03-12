@@ -16,6 +16,7 @@
 
 #include "buttons.h"
 #include "playback_control.h"
+#include "spiram_task.h"
 
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -221,7 +222,7 @@ esp_err_t buttons_init(void) {
   // Queue + task for dispatching actions off the timer daemon task.
   // Stack 4096 is enough for mDNS + HTTP operations in DACP.
   s_action_queue = xQueueCreate(ACTION_QUEUE_LEN, sizeof(int));
-  xTaskCreate(button_action_task, "btn_act", 4096, NULL, 5, NULL);
+  task_create_spiram(button_action_task, "btn_act", 4096, NULL, 5, NULL, NULL);
 
   ESP_LOGI(TAG, "Buttons initialized (interrupt-driven)");
   return ESP_OK;

@@ -175,8 +175,9 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
 
   stream->running = true;
   BaseType_t ret =
-      xTaskCreate(buffered_audio_task, "buff_audio", AUDIO_BUFFERED_STACK_SIZE,
-                  stream, 5, &state->buffered_task_handle);
+      task_create_spiram(buffered_audio_task, "buff_audio",
+                  AUDIO_BUFFERED_STACK_SIZE, stream, 5,
+                  &state->buffered_task_handle, &state->buffered_task_mem);
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "Failed to create buffered audio task");
     close(state->buffered_listen_socket);
@@ -210,6 +211,7 @@ static void buffered_stop(audio_stream_t *stream) {
     vTaskDelay(pdMS_TO_TICKS(300));
     state->buffered_task_handle = NULL;
   }
+  task_free_spiram(&state->buffered_task_mem);
 
   if (state->buffered_recv_buffer) {
     heap_caps_free(state->buffered_recv_buffer);

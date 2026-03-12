@@ -832,6 +832,7 @@ esp_err_t web_server_start(uint16_t port) {
 
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = port;
+  config.max_open_sockets = 3; // Limit to save lwIP socket slots for AirPlay
   config.max_uri_handlers = 20; // Room for captive portal + EQ handlers
   config.max_resp_headers = 8;
   config.stack_size = 8192;

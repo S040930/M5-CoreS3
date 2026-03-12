@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * DACP (Digital Audio Control Protocol) client.
@@ -8,15 +9,18 @@
  * Sends commands back to the AirPlay source device (iPhone/Mac) so its
  * UI reflects changes made via hardware buttons on the receiver.
  *
- * The AirPlay client advertises a DACP service via mDNS (_dacp._tcp)
- * and sends DACP-ID / Active-Remote headers during the RTSP session.
- * We use these to discover the client's DACP port and authenticate
- * our HTTP requests.
+ * Only works with AirPlay 1 connections — modern iOS AirPlay 2 does not
+ * send DACP-ID/Active-Remote headers and uses the Media Remote Protocol
+ * (MRP) instead, which we do not implement.  When DACP headers are
+ * present we discover the client's DACP port via mDNS (_dacp._tcp) and
+ * authenticate our HTTP requests with the Active-Remote token.
  *
  * Commands are HTTP GET requests to the client:
  *   GET /ctrl-int/1/playpause
  *   GET /ctrl-int/1/nextitem
  *   GET /ctrl-int/1/previtem
+ *   GET /ctrl-int/1/volumeup
+ *   GET /ctrl-int/1/volumedown
  *   GET /ctrl-int/1/setproperty?dmcp.volume=<0-100>
  */
 
@@ -57,7 +61,23 @@ void dacp_send_next(void);
 void dacp_send_prev(void);
 
 /**
- * Send volume change to the AirPlay client.
+ * Send volume up step command to the AirPlay client.
+ */
+void dacp_send_volume_up(void);
+
+/**
+ * Send volume down step command to the AirPlay client.
+ */
+void dacp_send_volume_down(void);
+
+/**
+ * Send absolute volume change to the AirPlay client.
  * @param volume_percent Volume 0-100 (DACP linear scale)
  */
 void dacp_send_volume(float volume_percent);
+
+/**
+ * Check whether a DACP session is currently active.
+ * @return true if DACP-ID and Active-Remote are set
+ */
+bool dacp_is_active(void);

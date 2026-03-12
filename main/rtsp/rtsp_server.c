@@ -20,7 +20,9 @@
 #include "rtsp_message.h"
 
 #include "ntp_clock.h"
+#include "ptp_clock.h"
 #include "rtsp_events.h"
+#include "dacp_client.h"
 
 static const char *TAG = "rtsp_server";
 
@@ -28,9 +30,20 @@ static const char *TAG = "rtsp_server";
 #define RTSP_BUFFER_INITIAL 4096
 #define RTSP_BUFFER_LARGE   ((size_t)256 * 1024)
 
+#define CLIENT_STACK_SIZE 8192
+#define SERVER_STACK_SIZE 4096
+
 static int server_socket = -1;
 static TaskHandle_t server_task_handle = NULL;
 static bool server_running = false;
+
+// Static task memory for client tasks (one per slot)
+static StaticTask_t s_client_tcb[2];
+static StackType_t s_client_stack[2][CLIENT_STACK_SIZE / sizeof(StackType_t)];
+
+// Static task memory for server task
+static StaticTask_t s_server_tcb;
+static StackType_t s_server_stack[SERVER_STACK_SIZE / sizeof(StackType_t)];
 
 // Client slot for tracking connections
 typedef struct {
@@ -244,6 +257,8 @@ cleanup:
   audio_receiver_stop();
   audio_output_flush();
   ntp_clock_stop();
+  dacp_clear_session();
+  ptp_clock_init();  // Restart PTP (stopped during v1 SETUP to free sockets)
   rtsp_events_emit(RTSP_EVENT_DISCONNECTED, NULL);
 
   // Always stop event task before closing its socket
@@ -348,15 +363,24 @@ static void server_task(void *pvParameters) {
     // Find slot for new client (alternate between 0 and 1)
     int new_slot = 1 - current_slot;
 
-    // If new slot still has a running task, wait for it briefly
+    // If new slot still has a running task, wait for it to fully exit.
+    // With static TCBs we MUST NOT reuse until the old task is deleted.
     if (clients[new_slot].task != NULL) {
-      int timeout = 10;
+      clients[new_slot].should_stop = true;
+      if (clients[new_slot].socket >= 0) {
+        shutdown(clients[new_slot].socket, SHUT_RDWR);
+      }
+      int timeout = 30; // 3 seconds max
       while (clients[new_slot].task != NULL && timeout > 0) {
         vTaskDelay(pdMS_TO_TICKS(100));
         timeout--;
       }
+      if (clients[new_slot].task != NULL) {
+        ESP_LOGE(TAG, "Slot %d task did not exit in time", new_slot);
+        close(new_socket);
+        continue;
+      }
     }
-
     // Signal old client to stop (in background)
     signal_old_client_stop(current_slot);
 
@@ -365,11 +389,12 @@ static void server_task(void *pvParameters) {
     clients[new_slot].should_stop = false;
     clients[new_slot].is_old = false;
 
-    // Start new client task immediately
-    BaseType_t ret =
-        xTaskCreate(client_task, "rtsp_client", 8192,
-                    (void *)(intptr_t)new_slot, 5, &clients[new_slot].task);
-    if (ret != pdPASS) {
+    // Start new client task immediately (static allocation)
+    clients[new_slot].task = xTaskCreateStatic(
+        client_task, "rtsp_client", CLIENT_STACK_SIZE / sizeof(StackType_t),
+        (void *)(intptr_t)new_slot, 5, s_client_stack[new_slot],
+        &s_client_tcb[new_slot]);
+    if (clients[new_slot].task == NULL) {
       ESP_LOGE(TAG, "Failed to create client task");
       close(new_socket);
       clients[new_slot].socket = -1;
@@ -403,9 +428,10 @@ esp_err_t rtsp_server_start(void) {
     return ESP_ERR_INVALID_STATE;
   }
 
-  BaseType_t ret = xTaskCreate(server_task, "rtsp_server", 4096, NULL, 5,
-                               &server_task_handle);
-  if (ret != pdPASS) {
+  server_task_handle = xTaskCreateStatic(
+      server_task, "rtsp_server", SERVER_STACK_SIZE / sizeof(StackType_t), NULL,
+      5, s_server_stack, &s_server_tcb);
+  if (server_task_handle == NULL) {
     return ESP_FAIL;
   }
 

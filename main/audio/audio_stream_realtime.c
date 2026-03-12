@@ -9,6 +9,7 @@
 
 #include "audio_receiver_internal.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -28,6 +29,40 @@
 #define AUDIO_TASK_CORE 1
 #endif
 
+// Pre-allocated task resources — only one connection at a time, so these
+// are allocated once and reused across connections to avoid fragmentation.
+// TCBs are static BSS (small). Stacks are pre-allocated from internal heap
+// at startup (via audio_realtime_preallocate) before WiFi fragments the
+// heap. Packet buffers are allocated on first use from SPIRAM.
+static StaticTask_t s_recv_task_tcb;
+static StackType_t *s_recv_task_stack;
+static uint8_t *s_recv_packet_buf;
+
+static StaticTask_t s_ctrl_task_tcb;
+static StackType_t *s_ctrl_task_stack;
+static uint8_t *s_ctrl_packet_buf;
+
+static const char *TAG = "audio_rt";
+
+esp_err_t audio_realtime_preallocate(void) {
+  if (!s_recv_task_stack) {
+    s_recv_task_stack = heap_caps_malloc(AUDIO_RECV_STACK_SIZE,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  }
+  if (!s_ctrl_task_stack) {
+    s_ctrl_task_stack = heap_caps_malloc(AUDIO_CTRL_STACK_SIZE,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  }
+  if (!s_recv_task_stack || !s_ctrl_task_stack) {
+    ESP_LOGE(TAG, "Failed to pre-allocate audio stacks (need %d+%d bytes)",
+             AUDIO_RECV_STACK_SIZE, AUDIO_CTRL_STACK_SIZE);
+    return ESP_ERR_NO_MEM;
+  }
+  ESP_LOGI(TAG, "Pre-allocated audio stacks (%d+%d bytes from internal heap)",
+           AUDIO_RECV_STACK_SIZE, AUDIO_CTRL_STACK_SIZE);
+  return ESP_OK;
+}
+
 typedef struct __attribute__((packed)) {
   uint8_t flags;
   uint8_t type;
@@ -35,8 +70,6 @@ typedef struct __attribute__((packed)) {
   uint32_t timestamp;
   uint32_t ssrc;
 } rtp_header_t;
-
-static const char *TAG = "audio_rt";
 
 static const uint8_t *parse_rtp(const uint8_t *packet, size_t len,
                                 uint16_t *seq, uint32_t *timestamp,
@@ -209,12 +242,11 @@ static void receiver_task(void *pvParameters) {
   audio_stream_t *stream = (audio_stream_t *)pvParameters;
   audio_receiver_state_t *state = audio_stream_state(stream);
 
-  uint8_t *packet = (uint8_t *)malloc(MAX_RTP_PACKET_SIZE);
-  if (!packet) {
-    ESP_LOGE(TAG, "Failed to allocate packet buffer");
-    vTaskDelete(NULL);
-    return;
+  if (!s_recv_packet_buf) {
+    s_recv_packet_buf =
+        heap_caps_malloc(MAX_RTP_PACKET_SIZE, MALLOC_CAP_SPIRAM);
   }
+  uint8_t *packet = s_recv_packet_buf;
 
   struct sockaddr_in src_addr;
   socklen_t addr_len = sizeof(src_addr);
@@ -225,7 +257,6 @@ static void receiver_task(void *pvParameters) {
     }
   }
 
-  free(packet);
   state->task_handle = NULL;
   vTaskDelete(NULL);
 }
@@ -246,13 +277,11 @@ static void control_receiver_task(void *pvParameters) {
   audio_stream_t *stream = (audio_stream_t *)pvParameters;
   audio_receiver_state_t *state = audio_stream_state(stream);
 
-  uint8_t *packet = (uint8_t *)malloc(MAX_RTP_PACKET_SIZE);
-  if (!packet) {
-    ESP_LOGE(TAG, "Failed to allocate control packet buffer");
-    state->control_task_handle = NULL;
-    vTaskDelete(NULL);
-    return;
+  if (!s_ctrl_packet_buf) {
+    s_ctrl_packet_buf =
+        heap_caps_malloc(MAX_RTP_PACKET_SIZE, MALLOC_CAP_SPIRAM);
   }
+  uint8_t *packet = s_ctrl_packet_buf;
   struct sockaddr_in src_addr;
   socklen_t addr_len = sizeof(src_addr);
 
@@ -338,7 +367,6 @@ static void control_receiver_task(void *pvParameters) {
     }
   }
 
-  free(packet);
   state->control_task_handle = NULL;
   vTaskDelete(NULL);
 }
@@ -350,6 +378,20 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
              state->data_port);
     return ESP_OK;
   }
+
+  // Count open sockets for diagnostics
+  int open_sockets = 0;
+  for (int fd = 0; fd < 64; fd++) {
+    int optval;
+    socklen_t optlen = sizeof(optval);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &optval, &optlen) == 0) {
+      open_sockets++;
+    }
+  }
+  ESP_LOGI(
+      TAG, "Before audio sockets: %d open, free internal=%lu (largest=%lu)",
+      open_sockets, (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
   uint16_t bound_port = port;
   state->data_socket = socket_utils_bind_udp(port, 1, 131072, &bound_port);
@@ -371,10 +413,22 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
   }
 
   stream->running = true;
-  BaseType_t ret = xTaskCreatePinnedToCore(
-      receiver_task, "audio_recv", AUDIO_RECV_STACK_SIZE, stream, 8,
-      &state->task_handle, AUDIO_TASK_CORE);
-  if (ret != pdPASS) {
+
+  ESP_LOGI(TAG, "Free heap: %lu internal (largest block %lu), %lu SPIRAM",
+           (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+           (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+  if (!s_recv_task_stack) {
+    ESP_LOGE(TAG, "Receiver stack not pre-allocated — call "
+                  "audio_realtime_preallocate() at startup");
+    stream->running = false;
+    return ESP_FAIL;
+  }
+  state->task_handle = xTaskCreateStaticPinnedToCore(
+      receiver_task, "audio_recv", AUDIO_RECV_STACK_SIZE / sizeof(StackType_t),
+      stream, 8, s_recv_task_stack, &s_recv_task_tcb, AUDIO_TASK_CORE);
+  if (!state->task_handle) {
     ESP_LOGE(TAG, "Failed to create receiver task");
     if (state->control_socket > 0) {
       close(state->control_socket);
@@ -387,11 +441,16 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
   }
 
   if (state->control_socket > 0) {
-    ret = xTaskCreatePinnedToCore(control_receiver_task, "ctrl_recv",
-                                  AUDIO_CTRL_STACK_SIZE, stream, 7,
-                                  &state->control_task_handle, AUDIO_TASK_CORE);
-    if (ret != pdPASS) {
-      ESP_LOGE(TAG, "Failed to create control receiver task");
+    state->control_task_handle =
+        s_ctrl_task_stack
+            ? xTaskCreateStaticPinnedToCore(
+                  control_receiver_task, "ctrl_recv",
+                  AUDIO_CTRL_STACK_SIZE / sizeof(StackType_t), stream, 7,
+                  s_ctrl_task_stack, &s_ctrl_task_tcb, AUDIO_TASK_CORE)
+            : NULL;
+    if (!state->control_task_handle) {
+      ESP_LOGE(TAG, "Failed to create control receiver task%s",
+               s_ctrl_task_stack ? "" : " — stack not pre-allocated");
       close(state->control_socket);
       state->control_socket = 0;
     }

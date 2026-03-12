@@ -1,6 +1,8 @@
 #include "audio_output.h"
 #include "audio_receiver.h"
+#include "audio_stream.h"
 #include "buttons.h"
+#include "spiram_task.h"
 #include "display.h"
 #include "dns_server.h"
 #include "ethernet.h"
@@ -203,6 +205,11 @@ void app_main(void) {
     ESP_LOGE(TAG, "Board init failed: %s", esp_err_to_name(err));
   }
 
+  // Pre-allocate audio task stacks while internal heap is still unfragmented.
+  // WiFi/TCP/TLS allocations fragment the heap, making large contiguous
+  // allocations unreliable later.
+  ESP_ERROR_CHECK(audio_realtime_preallocate());
+
   // Try ethernet first
   bool eth_available = false;
   err = ethernet_init();
@@ -246,7 +253,8 @@ void app_main(void) {
 
   // Start services that work on any interface
   web_server_start(80);
-  xTaskCreate(network_monitor_task, "net_mon", 4096, NULL, 5, NULL);
+  task_create_spiram(network_monitor_task, "net_mon", 4096, NULL, 5, NULL,
+                     NULL);
 
   bool connected = eth_available || wifi_is_connected();
   if (connected) {
