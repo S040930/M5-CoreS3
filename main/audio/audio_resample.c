@@ -25,7 +25,7 @@ static bool active;
 /* Persistent float conversion buffers (heap-allocated once) */
 static float *float_in;
 static float *float_out;
-static size_t float_in_cap;  /* in samples (frames * channels) */
+static size_t float_in_cap; /* in samples (frames * channels) */
 static size_t float_out_cap;
 
 static void ensure_float_bufs(size_t in_samples, size_t out_samples) {
@@ -74,11 +74,10 @@ bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
 
   int flags = SUBSAMPLE_INTERPOLATE | INCLUDE_LOWPASS | BLACKMAN_HARRIS;
 
-  resampler = resampleFixedRatioInit(
-      channels, RESAMPLER_NUM_TAPS, max_filters,
-      (double)input_rate, (double)output_rate,
-      0, /* 0 = auto lowpass freq */
-      flags);
+  resampler = resampleFixedRatioInit(channels, RESAMPLER_NUM_TAPS, max_filters,
+                                     (double)input_rate, (double)output_rate,
+                                     0, /* 0 = auto lowpass freq */
+                                     flags);
 
   if (!resampler) {
     ESP_LOGE(TAG, "Failed to allocate resampler");
@@ -87,8 +86,7 @@ bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
 
   /* Pre-allocate float buffers for typical frame size (352 + margin) */
   size_t typical_in = 400 * (size_t)channels;
-  size_t typical_out =
-      (size_t)(400.0 * fixed_ratio + 16) * (size_t)channels;
+  size_t typical_out = (size_t)(400.0 * fixed_ratio + 16) * (size_t)channels;
   ensure_float_bufs(typical_in, typical_out);
 
   if (!float_in || !float_out) {
@@ -105,8 +103,8 @@ bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
   return true;
 }
 
-size_t audio_resample_process(const int16_t *in, size_t in_frames,
-                              int16_t *out, size_t out_capacity) {
+size_t audio_resample_process(const int16_t *in, size_t in_frames, int16_t *out,
+                              size_t out_capacity) {
   if (!resampler || !active) {
     return 0;
   }
@@ -120,9 +118,9 @@ size_t audio_resample_process(const int16_t *in, size_t in_frames,
     float_in[i] = (float)in[i] * (1.0f / 32768.0f);
   }
 
-  ResampleResult result = resampleProcessInterleaved(
-      resampler, float_in, (int)in_frames,
-      float_out, (int)out_capacity, fixed_ratio);
+  ResampleResult result =
+      resampleProcessInterleaved(resampler, float_in, (int)in_frames, float_out,
+                                 (int)out_capacity, fixed_ratio);
 
   /* float → int16 with clamp */
   size_t out_total = (size_t)result.output_generated * (size_t)current_channels;
@@ -139,7 +137,9 @@ size_t audio_resample_process(const int16_t *in, size_t in_frames,
   return result.output_generated;
 }
 
-bool audio_resample_is_active(void) { return active; }
+bool audio_resample_is_active(void) {
+  return active;
+}
 
 void audio_resample_reset(void) {
   if (!resampler) {
@@ -179,18 +179,24 @@ bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
   return true;
 }
 
-size_t audio_resample_process(const int16_t *in, size_t in_frames,
-                              int16_t *out, size_t out_capacity) {
+size_t audio_resample_process(const int16_t *in, size_t in_frames, int16_t *out,
+                              size_t out_capacity) {
   (void)in;
   (void)out;
   (void)out_capacity;
   return in_frames;
 }
 
-bool audio_resample_is_active(void) { return false; }
-void audio_resample_reset(void) {}
-void audio_resample_destroy(void) {}
+bool audio_resample_is_active(void) {
+  return false;
+}
+void audio_resample_reset(void) {
+}
+void audio_resample_destroy(void) {
+}
 
-size_t audio_resample_max_output(size_t in_frames) { return in_frames; }
+size_t audio_resample_max_output(size_t in_frames) {
+  return in_frames;
+}
 
 #endif
