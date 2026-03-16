@@ -92,8 +92,15 @@ jobs:
           target: ${{ matrix.target }}
           command: >
             idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig }}" build &&
-            idf.py merge-bin --format raw -o merged-firmware.bin &&
-            cp build/merged-firmware.bin airplay2-receiver-${{ matrix.name }}.bin
+            SPIFFS_LINE=$(python $IDF_PATH/components/partition_table/gen_esp32part.py
+              build/partition_table/partition-table.bin | grep "^storage,") &&
+            SPIFFS_OFFSET=$(echo "$SPIFFS_LINE" | awk -F',' '{gsub(/ /,"",$4); print $4}') &&
+            SPIFFS_SIZE=$(echo "$SPIFFS_LINE" | awk -F',' '{gsub(/ /,"",$5); print $5}') &&
+            python $IDF_PATH/components/spiffs/spiffsgen.py $SPIFFS_SIZE data build/spiffs.bin &&
+            cd build &&
+            esptool.py --chip ${{ matrix.target }} merge_bin --format raw
+              -o merged-firmware.bin $(cat flash_args) $SPIFFS_OFFSET spiffs.bin &&
+            cp merged-firmware.bin ../airplay2-receiver-${{ matrix.name }}.bin
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v6

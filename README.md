@@ -189,6 +189,87 @@ Once the device is connected to your WiFi, you can update the firmware wirelessl
 
 ---
 
+## SPIFFS Filesystem
+
+The firmware uses a **SPIFFS partition** on flash to store web pages and DAC configuration files. This means you can update web UI pages and hybrid flow DSP programs without recompiling the firmware.
+
+### Partition Layout
+
+A `storage` partition is added to the partition table:
+
+| Board | Partition Size | Address |
+|---|---|---|
+| SqueezeAMP (8+MB) | 316 KB | 0x5B1000 |
+| SqueezeAMP 4M | 192 KB | 0x3D1000 |
+
+The SPIFFS partition is mounted at `/spiffs` on boot.
+
+### Data Directory
+
+The `data/` directory in the project root contains the files that get flashed to the SPIFFS partition:
+
+```
+data/
+├── www/              # Web interface pages
+│   ├── index.html    # Main setup / control panel
+│   ├── logs.html     # Live log viewer
+│   └── eq.html       # Equalizer page (Esparagus Audio Brick)
+└── hf/               # Hybrid flow DSP programs (SqueezeAMP)
+    ├── tt_hf1.bin    # TechTonic HF1
+    └── tt_hf6.bin    # TechTonic HF6
+```
+
+### Flashing the SPIFFS Image
+
+**First time (serial only):** The partition table changes, so the first flash after upgrading must be done over serial — OTA won't work because the old partition layout doesn't include the storage partition.
+
+```bash
+# Flash firmware + partition table + SPIFFS image
+pio run -e squeezeamp-bt -t upload && pio run -e squeezeamp-bt -t uploadfs
+```
+
+**Subsequent updates:** After the partition table is in place, you can update individual files over WiFi using the file management API (see below), or re-flash the full SPIFFS image over serial.
+
+### OTA File Management API
+
+Three HTTP endpoints let you manage SPIFFS files over WiFi without reflashing:
+
+**Upload a file:**
+```bash
+curl -X POST "http://<device-ip>/api/fs/upload?path=/spiffs/hf/my_flow.bin" \
+     --data-binary @my_flow.bin
+```
+
+**Delete a file:**
+```bash
+curl -X POST "http://<device-ip>/api/fs/delete?path=/spiffs/hf/old_flow.bin"
+```
+
+**List files in a directory:**
+```bash
+curl "http://<device-ip>/api/fs/list?dir=/spiffs/hf"
+```
+
+Paths are restricted to `/spiffs/` and directory traversal (`..`) is rejected. Maximum upload size is 64 KB.
+
+### Hybrid Flow Configuration (SqueezeAMP)
+
+The TAS575xM DAC supports **hybrid flow** DSP programs that run on the chip's miniDSP core. These are loaded from SPIFFS at boot.
+
+**To configure which hybrid flow is loaded:**
+
+Set `CONFIG_TAS57XX_HYBRID_FLOW` in menuconfig (AirPlay Receiver → DAC Configuration → TAS57xx Hybrid Flow) to the name of the `.bin` file (without the extension). For example, `hf1` loads `/spiffs/hf/hf1.bin`. Leave empty to disable.
+
+**To add a new hybrid flow:**
+
+1. Export a `.cfg` file from TI PurePath Console
+2. Convert to binary: `python3 components/dac_tas57xx/hybridflows/convert_cfg.py --bin my_flow.cfg`
+3. Copy `my_flow.bin` to `data/hf/` (for serial flash) or upload via the API
+
+> **Note:** Hybrid flows are only available to TAS575xM chips. The driver detects the chip family at boot and skips HF loading on TAS578x devices.
+
+---
+
 ## SqueezeAMP
 
 The **[SqueezeAMP](https://github.com/philippe44/SqueezeAMP)** is an ESP32-based board with a TAS5756 DAC and built-in Class-D amplifier. No external DAC needed — just connect speakers directly.
@@ -419,6 +500,93 @@ SPI mode exposes additional GPIO settings for CLK, MOSI, CS, DC, and RST.
 
 ---
 
+## Hardware Buttons (Optional)
+
+You can wire physical buttons to control playback directly from the device — no phone needed. Buttons work with both AirPlay and Bluetooth sources.
+
+### AirPlay v1 Requirement
+
+Button-driven remote control (play/pause, next/prev track) relies on **DACP** (Digital Audio Control Protocol) — a protocol where iOS sends a session ID and port that the receiver uses to send commands back to the source. **iOS only sends DACP headers in AirPlay v1 (classic) mode.** In AirPlay 2 mode, Apple uses MRP (Media Remote Protocol) instead, which is not implemented.
+
+This means:
+
+- **AirPlay 2 (default):** Volume buttons work (applied locally on the DAC), but play/pause and track skip **fall back to local mute** — they can't control the source device
+- **AirPlay v1 (forced):** All buttons work fully — volume, play/pause, next/prev all control the source device via DACP
+- **Bluetooth:** All buttons work fully via AVRCP passthrough regardless of AirPlay mode
+
+To enable full button control over AirPlay, force AirPlay v1 mode:
+
+```bash
+idf.py menuconfig
+# Navigate to: AirPlay Receiver → AirPlay Protocol
+# Enable "Force AirPlay v1 (classic) protocol"
+```
+
+Or add to your sdkconfig defaults:
+
+```
+CONFIG_AIRPLAY_FORCE_V1=y
+```
+
+> **Trade-off:** AirPlay v1 disables AirPlay 2 features (HomeKit pairing, encrypted transport, multi-room sync). The device still appears in AirPlay menus on iOS but as a classic receiver. Bluetooth is unaffected.
+
+### Supported Actions
+
+| Button       | Action                                        |
+| ------------ | --------------------------------------------- |
+| Play/Pause   | Toggle playback                               |
+| Volume Up    | Increase volume (~3 dB step, auto-repeat)     |
+| Volume Down  | Decrease volume (~3 dB step, auto-repeat)     |
+| Next Track   | Skip to next track                            |
+| Previous     | Go to previous track                          |
+
+Volume buttons support **auto-repeat**: hold for 500 ms and the action repeats every 200 ms.
+
+### How It Works
+
+- Buttons are **active-low** — wire between the GPIO and GND (no external resistor needed for most GPIOs)
+- Internal pull-ups are enabled automatically on GPIOs 0–33
+- GPIOs 34–39 (input-only on ESP32) require an **external pull-up resistor** — the driver warns at boot if these are used
+- Interrupt-driven with 50 ms software debounce — no polling overhead
+- Actions are dispatched to the active source: DACP commands for AirPlay 1, AVRCP passthrough for Bluetooth
+
+### Wiring
+
+```
+ESP32 GPIO ──┤ ├── GND
+           (button)
+```
+
+No resistor needed — the internal pull-up keeps the pin high when the button is open.
+
+### Configuration
+
+All button GPIOs default to `-1` (disabled). To enable buttons:
+
+```bash
+idf.py menuconfig
+# Navigate to: AirPlay Receiver → Button Configuration
+# Set each GPIO pin, or leave at -1 to disable
+```
+
+Or with PlatformIO:
+
+```bash
+pio run -e <env> -t menuconfig
+```
+
+| Option                | Default | Description                  |
+| --------------------- | ------- | ---------------------------- |
+| Play/Pause button GPIO | -1     | GPIO for play/pause          |
+| Volume Up button GPIO  | -1     | GPIO for volume up (repeats) |
+| Volume Down button GPIO | -1    | GPIO for volume down (repeats) |
+| Next Track button GPIO | -1     | GPIO for next track          |
+| Previous Track button GPIO | -1 | GPIO for previous track      |
+
+> **Note:** The button driver requires the GPIO ISR service to be installed by the board support layer. All included board configurations do this already.
+
+---
+
 ## Features
 
 - **AirPlay 2 protocol** — shows up natively in Control Center and all AirPlay apps
@@ -431,6 +599,7 @@ SPI mode exposes additional GPIO settings for CLK, MOSI, CS, DC, and RST.
 - **48 kHz output** — optional sample rate conversion (44.1 kHz → 48 kHz) via ART sinc resampler for DACs and S/PDIF receivers that need it
 - **LED indicator** — visual feedback for playback status
 - **OLED display** — optional screen showing track metadata, progress bar, and playback time
+- **Hardware buttons** — optional physical buttons for play/pause, volume, and track skip with auto-repeat
 - **SqueezeAMP support** — ESP32 + TAS5756 DAC with built-in amplifier
 - **Esparagus Audio Brick support** — ESP32 + TAS5825M DAC/amp with on-chip DSP and 15-band EQ
 
@@ -545,6 +714,8 @@ MCLK is not used for PCM5102A as generates it internally. It is, however, connec
 | **DAC Abstraction** | `components/dac/`     | Abstract DAC API (Kconfig-selected)       |
 | **Board Support**   | `components/boards/`  | Per-board HAL (GPIOs, SPI bus, init)      |
 | **Display**         | `components/display/` | OLED display driver (u8g2-based)          |
+| **SPIFFS Storage**  | `components/spiffs_storage/` | SPIFFS mount and filesystem init   |
+| **Buttons**         | `main/buttons.c`       | Hardware button input with debounce       |
 
 ### Project Structure
 
@@ -562,9 +733,13 @@ components/
 ├── dac_tas57xx/    # TI TAS57xx DAC driver (SqueezeAMP)
 ├── dac_tas58xx/    # TI TAS58xx DAC driver (Esparagus Audio Brick)
 ├── display/        # OLED display driver (u8g2-based, optional)
+├── spiffs_storage/ # SPIFFS filesystem mount
 ├── u8g2/           # u8g2 graphics library (git submodule)
 ├── u8g2-hal-esp-idf/ # ESP-IDF HAL for u8g2 (git submodule)
 └── boards/         # Board support (SqueezeAMP, Esparagus Audio Brick, ESP32-S3 generic)
+data/
+├── www/            # Web interface HTML pages (served from SPIFFS)
+└── hf/             # HybridFlow binary files (loaded by TAS57xx DAC driver)
 ```
 
 ---
