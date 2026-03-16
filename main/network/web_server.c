@@ -269,6 +269,11 @@ static esp_err_t system_info_handler(httpd_req_t *req) {
   cJSON_AddNumberToObject(info, "free_heap", esp_get_free_heap_size());
   const esp_app_desc_t *app_desc = esp_app_get_description();
   cJSON_AddStringToObject(info, "firmware_version", app_desc->version);
+#ifdef CONFIG_DAC_TAS58XX
+  cJSON_AddBoolToObject(info, "eq_supported", true);
+#else
+  cJSON_AddBoolToObject(info, "eq_supported", false);
+#endif
 
   cJSON_AddItemToObject(json, "info", info);
   cJSON_AddBoolToObject(json, "success", true);

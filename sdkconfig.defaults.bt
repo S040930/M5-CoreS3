@@ -3,20 +3,18 @@
 # These options are ignored on ESP32-S3/C3/etc which lack Classic BT.
 #
 # To enable: Component config → Bluetooth → then these are set automatically.
-# The A2DP_SINK_ENABLED option appears under "Airplay ESP Configuration → Bluetooth A2DP Sink".
 
 CONFIG_BT_ENABLED=y
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 CONFIG_BT_BLUEDROID_ENABLED=y
 CONFIG_BT_CLASSIC_ENABLED=y
 CONFIG_BT_A2DP_ENABLE=y
-CONFIG_A2DP_SINK_ENABLED=y
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
 # Security Setup
 # SSP requires a screen on the device to show the code
 CONFIG_BT_SSP_ENABLED=n
-CONFIG_BT_PIN_CODE=05032026
+CONFIG_BT_PIN_CODE="05032026"
 
 
 # Disable BLE host stack — A2DP uses Classic BT only.  Disabling BLE avoids
@@ -57,6 +55,3 @@ CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
 CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 CONFIG_BTDM_CTRL_HLI=n
 CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
-
-# Force AirPlay v1 for use with BT - button controls need this to work
-CONFIG_AIRPLAY_FORCE_V1=y

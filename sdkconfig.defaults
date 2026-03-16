@@ -44,5 +44,4 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # HTTP server — limit open sockets to avoid LWIP socket exhaustion.
 # Default is 7; with RTSP + audio + NTP + PTP + WiFi the budget is tight.
-CONFIG_HTTPD_MAX_OPEN_SOCKETS=3
 CONFIG_HTTPD_WS_SUPPORT=y

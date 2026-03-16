@@ -78,7 +78,7 @@ input:focus{outline:none;border-color:#e94560}
 <div class='card'><h2>System Logs</h2>
 <p style='color:#888;font-size:13px;margin-bottom:12px'>Live ESP log output via WebSocket</p>
 <a href='/logs' class='btn btn-primary'>Open Log Viewer</a></div>
-<div class='card'><h2>Equalizer</h2>
+<div class='card' id='eq-card' style='display:none'><h2>Equalizer</h2>
 <p style='color:#888;font-size:13px;margin-bottom:12px'>15-band parametric EQ for DAC tuning</p>
 <a href='/eq' class='btn btn-primary'>Open Equalizer</a></div>
 </div>
@@ -124,6 +124,7 @@ async function loadInfo(){
       document.getElementById('info-name').textContent=i.device_name||'-';
       document.getElementById('info-heap').textContent=Math.round(i.free_heap/1024)+' KB';
       document.getElementById('info-fw').textContent=i.firmware_version||'-';
+      if(i.eq_supported){document.getElementById('eq-card').style.display='';}
       document.getElementById('dev-name').placeholder=i.device_name||'';}}catch(e){}}
 window.onload=function(){
   document.getElementById('fw-file').onchange=function(e){var f=e.target.files[0];
