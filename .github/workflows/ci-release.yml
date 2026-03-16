@@ -28,8 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: "recursive"
 
       - name: Build and generate compile_commands.json
         uses: espressif/esp-idf-ci-action@v1
