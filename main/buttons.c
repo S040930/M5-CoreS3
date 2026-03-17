@@ -18,6 +18,7 @@
 #include "playback_control.h"
 #include "spiram_task.h"
 
+#include "board_common.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -190,8 +191,11 @@ static void configure_button(button_id_t id, int gpio, bool repeatable) {
 }
 
 esp_err_t buttons_init(void) {
-  // This function assumes that the GLOBAL ISR was created in the board.c layer.
-  // See gpio_install_isr_service() for details
+  // Ensure the shared GPIO ISR service is installed (idempotent)
+  esp_err_t err = board_gpio_isr_init();
+  if (err != ESP_OK) {
+    return err;
+  }
 
   // Configure each button from Kconfig (adds ISR handlers)
   configure_button(BTN_PLAY_PAUSE, CONFIG_BTN_PLAY_PAUSE_GPIO, false);

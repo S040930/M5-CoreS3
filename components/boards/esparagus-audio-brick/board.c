@@ -258,11 +258,8 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
 
 static esp_err_t init_spkfault_gpio(void) {
 #if BOARD_SPKFAULT_GPIO >= 0
-  // Install ISR service (shared across all GPIOs)
-  esp_err_t err = gpio_install_isr_service(0);
-  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-    ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s",
-             esp_err_to_name(err));
+  esp_err_t err = board_gpio_isr_init();
+  if (err != ESP_OK) {
     return err;
   }
 

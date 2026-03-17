@@ -55,6 +55,18 @@ board_res_handle_t iot_board_get_handle(int id);
  */
 const char *iot_board_get_info(void);
 
+/* ========== Common GPIO ISR service ========== */
+
+/**
+ * @brief Install the shared GPIO ISR service
+ *
+ * Safe to call multiple times — returns ESP_OK if already installed.
+ * Board-specific init and the button driver both rely on this.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t board_gpio_isr_init(void);
+
 /* ========== Common I2C bus helpers ========== */
 
 /** Default I2C timeout in ms used by the helpers below. */

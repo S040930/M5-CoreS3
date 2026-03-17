@@ -33,6 +33,22 @@ __attribute__((weak)) const char *iot_board_get_info(void) {
   return "Unknown Board";
 }
 
+/* ========== Common GPIO ISR service ========== */
+
+#include "driver/gpio.h"
+
+esp_err_t board_gpio_isr_init(void) {
+  esp_err_t err = gpio_install_isr_service(0);
+  if (err == ESP_ERR_INVALID_STATE) {
+    return ESP_OK; // already installed
+  }
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s",
+             esp_err_to_name(err));
+  }
+  return err;
+}
+
 /* ========== Common I2C bus helpers ========== */
 
 esp_err_t board_i2c_add_device(i2c_master_bus_handle_t bus, uint8_t addr,

@@ -327,10 +327,8 @@ static esp_err_t init_mute_gpio(void) {
 }
 
 static esp_err_t init_gpio_isr_task(void) {
-  esp_err_t err = gpio_install_isr_service(0);
-  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-    ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s",
-             esp_err_to_name(err));
+  esp_err_t err = board_gpio_isr_init();
+  if (err != ESP_OK) {
     return err;
   }
 

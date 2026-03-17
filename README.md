@@ -210,13 +210,12 @@ The `data/` directory in the project root contains the files that get flashed to
 
 ```
 data/
-├── www/              # Web interface pages
-│   ├── index.html    # Main setup / control panel
-│   ├── logs.html     # Live log viewer
-│   └── eq.html       # Equalizer page (Esparagus Audio Brick)
-└── hf/               # Hybrid flow DSP programs (SqueezeAMP)
-    ├── tt_hf1.bin    # TechTonic HF1
-    └── tt_hf6.bin    # TechTonic HF6
+├── www/               # Web interface pages
+│   ├── index.html     # Main setup / control panel
+│   ├── logs.html      # Live log viewer
+│   └── eq.html        # Equalizer page (Esparagus Audio Brick)
+└── hf/                # Hybrid flow DSP programs (SqueezeAMP)
+    └── tas57xx_fw.bin # Provide this file for hybrid flow support on TAS575xM DACs
 ```
 
 ### Flashing the SPIFFS Image
@@ -587,7 +586,7 @@ pio run -e <env> -t menuconfig
 | Next Track button GPIO | -1     | GPIO for next track          |
 | Previous Track button GPIO | -1 | GPIO for previous track      |
 
-> **Note:** The button driver requires the GPIO ISR service to be installed by the board support layer. All included board configurations do this already.
+> **Note:** The button driver automatically installs the shared GPIO ISR service (`board_gpio_isr_init()`) if it hasn't been set up already by the board support layer.
 
 ---
 
