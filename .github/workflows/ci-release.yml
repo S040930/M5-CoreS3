@@ -68,18 +68,15 @@ jobs:
           - name: esp32s3
             target: esp32s3
             sdkconfig: "sdkconfig.defaults;sdkconfig.defaults.esp32s3"
-          - name: squeezeamp
-            target: esp32
-            sdkconfig: "sdkconfig.defaults;sdkconfig.defaults.squeezeamp"
           - name: squeezeamp-bt
             target: esp32
             sdkconfig: "sdkconfig.defaults;sdkconfig.defaults.squeezeamp;sdkconfig.defaults.bt"
           - name: squeezeamp-4m
             target: esp32
             sdkconfig: "sdkconfig.defaults;sdkconfig.defaults.squeezeamp-4m"
-          - name: esparagus-audio-brick
+          - name: esparagus-audio-brick-bt
             target: esp32
-            sdkconfig: "sdkconfig.defaults;sdkconfig.defaults.esparagus-audio-brick"
+            sdkconfig: "sdkconfig.defaults;sdkconfig.defaults.esparagus-audio-brick;sdkconfig.defaults.bt"
     steps:
       - uses: actions/checkout@v6
         with:
