@@ -91,8 +91,8 @@ jobs:
             idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig }}" build &&
             SPIFFS_LINE=$(python $IDF_PATH/components/partition_table/gen_esp32part.py
               build/partition_table/partition-table.bin | grep "^storage,") &&
-            SPIFFS_OFFSET=$(echo "$SPIFFS_LINE" | awk -F',' '{gsub(/ /,"",$4); print $4}') &&
-            SPIFFS_SIZE=$(echo "$SPIFFS_LINE" | awk -F',' '{gsub(/ /,"",$5); print $5}') &&
+            SPIFFS_OFFSET=$(echo "$SPIFFS_LINE" | cut -d, -f4 | tr -d " ") &&
+            SPIFFS_SIZE=$(echo "$SPIFFS_LINE" | cut -d, -f5 | tr -d " ") &&
             python $IDF_PATH/components/spiffs/spiffsgen.py $SPIFFS_SIZE data build/spiffs.bin &&
             cd build &&
             esptool.py --chip ${{ matrix.target }} merge_bin --format raw
