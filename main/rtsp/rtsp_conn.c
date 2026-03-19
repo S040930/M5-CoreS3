@@ -106,6 +106,9 @@ void rtsp_conn_cleanup(rtsp_conn_t *conn) {
 
   // Reset encryption state
   conn->encrypted_mode = false;
+
+  // Persist volume to NVS once at disconnect
+  settings_persist_volume();
 }
 
 void rtsp_conn_set_volume(rtsp_conn_t *conn, float volume_db) {
@@ -128,7 +131,7 @@ void rtsp_conn_set_volume(rtsp_conn_t *conn, float volume_db) {
     conn->volume_q15 = (int32_t)(curved * 32768.0f);
   }
 
-  // Persist to NVS
+  // Update cached volume + DAC (NVS persisted at disconnect)
   settings_set_volume(volume_db);
 }
 
