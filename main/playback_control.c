@@ -37,7 +37,7 @@ static const char *TAG = "playback_ctrl";
 
 static playback_source_t s_source = PLAYBACK_SOURCE_NONE;
 static bool s_muted = false;
-static float s_pre_mute_db = 0.0f;
+static float s_pre_mute_db = -15.0f;
 
 esp_err_t playback_control_init(void) {
   dacp_init();

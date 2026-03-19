@@ -866,7 +866,6 @@ void bt_a2dp_send_volume_up(void) {
   esp_avrc_ct_send_set_absolute_volume_cmd(0, new_vol);
   float volume_db = ((float)new_vol / 127.0f) * 30.0f - 30.0f;
   dac_set_volume(volume_db);
-  settings_set_bt_volume(new_vol);
   ESP_LOGI(TAG, "AVRCP: volume up -> %d/127", new_vol);
 }
 

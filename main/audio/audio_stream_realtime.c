@@ -397,20 +397,6 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
     return ESP_OK;
   }
 
-  // Count open sockets for diagnostics
-  int open_sockets = 0;
-  for (int fd = 0; fd < 64; fd++) {
-    int optval;
-    socklen_t optlen = sizeof(optval);
-    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &optval, &optlen) == 0) {
-      open_sockets++;
-    }
-  }
-  ESP_LOGI(
-      TAG, "Before audio sockets: %d open, free internal=%lu (largest=%lu)",
-      open_sockets, (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-
   uint16_t bound_port = port;
   state->data_socket = socket_utils_bind_udp(port, 1, 131072, &bound_port);
   if (state->data_socket < 0) {
