@@ -98,7 +98,8 @@ static volatile bool s_audio_started = false;
 static volatile bool s_avrc_playing = false; /* AVRCP play state (instant) */
 static volatile bool s_i2s_task_running = false;
 static bool s_bt_discoverable = true;
-static uint8_t s_avrc_volume = 64; /* 0-127, AVRCP absolute volume */
+static uint8_t s_avrc_volume = 64;      /* 0-127, AVRCP absolute volume */
+static volatile bool s_vol_ntf_pending = false; /* phone registered for volume change */
 
 static RingbufHandle_t s_ringbuf = NULL;
 static SemaphoreHandle_t s_i2s_sem = NULL;
@@ -606,6 +607,7 @@ static void bt_avrc_tg_evt_handler(uint16_t event, void *param) {
       rn_param.volume = s_avrc_volume;
       esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE,
                               ESP_AVRC_RN_RSP_INTERIM, &rn_param);
+      s_vol_ntf_pending = true;
     }
     break;
 
@@ -854,6 +856,20 @@ void bt_a2dp_send_prev(void) {
   ESP_LOGI(TAG, "AVRCP: prev");
 }
 
+/**
+ * Notify the source (phone) that local volume changed via AVRCP TG.
+ * Only sends if the phone previously registered for the notification.
+ */
+static void notify_volume_changed(void) {
+  if (s_vol_ntf_pending) {
+    esp_avrc_rn_param_t rn_param;
+    rn_param.volume = s_avrc_volume;
+    esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE,
+                            ESP_AVRC_RN_RSP_CHANGED, &rn_param);
+    s_vol_ntf_pending = false;
+  }
+}
+
 void bt_a2dp_send_volume_up(void) {
   // Adjust local AVRCP volume by ~10 units (≈3 dB equivalent)
   uint8_t new_vol = s_avrc_volume;
@@ -863,9 +879,9 @@ void bt_a2dp_send_volume_up(void) {
     new_vol = 127;
   }
   s_avrc_volume = new_vol;
-  esp_avrc_ct_send_set_absolute_volume_cmd(0, new_vol);
   float volume_db = ((float)new_vol / 127.0f) * 30.0f - 30.0f;
   dac_set_volume(volume_db);
+  notify_volume_changed();
   ESP_LOGI(TAG, "AVRCP: volume up -> %d/127", new_vol);
 }
 
@@ -877,8 +893,8 @@ void bt_a2dp_send_volume_down(void) {
     new_vol = 0;
   }
   s_avrc_volume = new_vol;
-  esp_avrc_ct_send_set_absolute_volume_cmd(0, new_vol);
   float volume_db = ((float)new_vol / 127.0f) * 30.0f - 30.0f;
   dac_set_volume(volume_db);
+  notify_volume_changed();
   ESP_LOGI(TAG, "AVRCP: volume down -> %d/127", new_vol);
 }
