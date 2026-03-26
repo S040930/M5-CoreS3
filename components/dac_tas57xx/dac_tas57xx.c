@@ -15,6 +15,7 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #define TAS575x (0x98 >> 1)
@@ -78,6 +79,7 @@ static i2c_master_dev_handle_t tas57xx_device_handle;
 static dac_power_mode_t s_power_state = DAC_POWER_OFF;
 static uint8_t *s_hf_buf = NULL; // Cached hybrid flow (TAS5754M only)
 static long s_hf_size = 0;
+static SemaphoreHandle_t s_dac_mutex = NULL;
 
 static esp_err_t write_cmd(tas57xx_cmd_e cmd, ...);
 static int tas57xx_detect(i2c_master_bus_handle_t s_bus_handle);
@@ -108,6 +110,14 @@ static esp_err_t tas57xx_write_hf(const uint8_t *stream) {
 
 static esp_err_t tas57xx_init(void *i2c_bus) {
   esp_err_t err = ESP_OK;
+
+  if (s_dac_mutex == NULL) {
+    s_dac_mutex = xSemaphoreCreateMutex();
+    if (s_dac_mutex == NULL) {
+      ESP_LOGE(TAG, "Failed to create DAC mutex");
+      return ESP_ERR_NO_MEM;
+    }
+  }
 
   s_bus_handle = (i2c_master_bus_handle_t)i2c_bus;
   if (s_bus_handle == NULL) {
@@ -198,6 +208,10 @@ static esp_err_t tas57xx_deinit(void) {
   s_bus_handle = NULL;
   free(s_hf_buf);
   s_hf_buf = NULL;
+  if (s_dac_mutex != NULL) {
+    vSemaphoreDelete(s_dac_mutex);
+    s_dac_mutex = NULL;
+  }
   s_hf_size = 0;
   return err;
 }
@@ -228,6 +242,7 @@ static void tas57xx_enable_speaker(bool enable) {
 }
 
 static void tas57xx_set_power_mode(dac_power_mode_t mode) {
+  xSemaphoreTake(s_dac_mutex, portMAX_DELAY);
   tas57xx_enable_speaker(false);
   switch (mode) {
   case DAC_POWER_STANDBY:
@@ -256,6 +271,7 @@ static void tas57xx_set_power_mode(dac_power_mode_t mode) {
     break;
   }
   s_power_state = mode;
+  xSemaphoreGive(s_dac_mutex);
 }
 
 static void tas57xx_enable_line_out(bool enable) {
@@ -264,6 +280,7 @@ static void tas57xx_enable_line_out(bool enable) {
 }
 
 static void tas57xx_set_volume(float volume_airplay_db) {
+  xSemaphoreTake(s_dac_mutex, portMAX_DELAY);
   // Clamp AirPlay input range (-30 to 0)
   if (volume_airplay_db > 0.0f) {
     volume_airplay_db = 0.0f;
@@ -306,6 +323,7 @@ static void tas57xx_set_volume(float volume_airplay_db) {
 
   write_cmd(TAS57XX_SET_VOLUME_A_L, reg_val);
   write_cmd(TAS57XX_SET_VOLUME_B_R, reg_val);
+  xSemaphoreGive(s_dac_mutex);
 }
 
 const dac_ops_t dac_tas57xx_ops = {

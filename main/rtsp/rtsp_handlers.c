@@ -1722,10 +1722,14 @@ static void handle_setpeers(int socket, rtsp_conn_t *conn,
     ESP_LOGI(TAG, "SETPEERS: got bplist");
   }
 
-  // Reset audio timing anchor when PTP peers change
-  // The PTP clock master may change, invalidating the current anchor
-  ESP_LOGI(TAG, "SETPEERS: Resetting timing anchor (PTP peers changed)");
-  audio_receiver_reset_timing();
+  // PTP peers changed — the PTP clock will re-lock to the new master on
+  // its own.  Do NOT reset the audio timing anchor here: the anchor's
+  // network_time_ns is in absolute PTP time, and compute_early_us
+  // auto-corrects via ptp_clock_get_offset_ns() as PTP re-locks.
+  // Resetting mid-stream orphans the pre-buffer (up to ~23 s of audio)
+  // with no valid anchor, causing consecutive-early detection to
+  // invalidate the anchor and break playback.
+  ESP_LOGI(TAG, "SETPEERS: PTP peers changed, clock will re-lock");
 
   rtsp_send_ok(socket, conn, req->cseq);
 }
