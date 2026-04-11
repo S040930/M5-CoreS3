@@ -1136,7 +1136,7 @@ static esp_err_t write_dsp_signal_path_defaults(void) {
 }
 
 static esp_err_t ensure_custom_coeffs_mode(void) {
-  // TODO: not applicable to TAS5805M, bypass?
+  // Only applicable to TAS5825M
   uint8_t dsp_ctrl;
   esp_err_t err = tas58xx_read_reg(REG_DSP_CTRL, &dsp_ctrl);
   if (err != ESP_OK) {
@@ -1208,10 +1208,12 @@ static esp_err_t program_biquad_raw(int bq,
                                     const uint8_t data[EQ_COEFF_BYTES]) {
   esp_err_t err;
 
-  /* Ensure DSP has all signal-path defaults before using custom coefficients */
-  err = ensure_custom_coeffs_mode();
-  if (err != ESP_OK) {
-    return err;
+  if (tas58xx_model == TAS58XX_MODEL_TAS5825M) {
+    /* Ensure DSP has all signal-path defaults before using custom coefficients */
+    err = ensure_custom_coeffs_mode();
+    if (err != ESP_OK) {
+      return err;
+    }
   }
 
   /* Enter coefficient book */
@@ -1307,12 +1309,15 @@ static esp_err_t write_eq_mode(bool enable) {
 
 esp_err_t tas58xx_eq_enable(bool enable) {
   REG_LOCK();
+  esp_err_t err;
 
-  /* Ensure DSP defaults are written before touching EQ mode */
-  esp_err_t err = ensure_custom_coeffs_mode();
-  if (err != ESP_OK) {
-    REG_UNLOCK();
-    return err;
+  if (tas58xx_model == TAS58XX_MODEL_TAS5825M) {
+    /* Ensure DSP defaults are written before touching EQ mode */
+    err = ensure_custom_coeffs_mode();
+    if (err != ESP_OK) {
+      REG_UNLOCK();
+      return err;
+    }
   }
 
   err = write_eq_mode(enable);
