@@ -10,6 +10,8 @@ static uint64_t s_window_start_us = 0;
 static uint64_t s_busy_accum_us = 0;
 static uint8_t s_avg_load_pct = 0;
 static uint8_t s_peak_load_pct = 0;
+static uint32_t s_gap_concealment_blocks = 0;
+static uint32_t s_underrun_bursts = 0;
 
 static void refresh_load_metrics(void) {
   uint64_t now_us = (uint64_t)esp_timer_get_time();
@@ -96,6 +98,13 @@ void audio_pipeline_note_playback_busy(uint32_t busy_us) {
   s_busy_accum_us += busy_us;
 }
 
+void audio_pipeline_note_gap_concealment(bool burst_start) {
+  s_gap_concealment_blocks++;
+  if (burst_start) {
+    s_underrun_bursts++;
+  }
+}
+
 void audio_pipeline_get_snapshot(audio_pipeline_snapshot_t *snapshot) {
   if (!snapshot) {
     return;
@@ -113,6 +122,9 @@ void audio_pipeline_get_snapshot(audio_pipeline_snapshot_t *snapshot) {
   snapshot->buffered_port = audio_receiver_get_buffered_port();
   snapshot->avg_task_load_pct = s_avg_load_pct;
   snapshot->peak_task_load_pct = s_peak_load_pct;
+  snapshot->gap_concealment_blocks = s_gap_concealment_blocks;
+  snapshot->underrun_bursts = s_underrun_bursts;
+  audio_dsp_get_stats(&snapshot->dsp);
   if (!s_running) {
     snapshot->avg_task_load_pct = 0;
   }

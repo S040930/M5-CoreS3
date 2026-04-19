@@ -143,6 +143,28 @@ static void add_status_result(cJSON *result) {
                           snapshot.pipeline.stats.buffer_underruns);
   cJSON_AddNumberToObject(pipeline, "buffer_overruns",
                           snapshot.pipeline.stats.buffer_overruns);
+  cJSON_AddNumberToObject(pipeline, "gap_concealment_blocks",
+                          snapshot.pipeline.gap_concealment_blocks);
+  cJSON_AddNumberToObject(pipeline, "underrun_bursts",
+                          snapshot.pipeline.underrun_bursts);
+  cJSON_AddNumberToObject(pipeline, "dsp_peak_dbfs_x100",
+                          snapshot.pipeline.dsp.peak_dbfs_x100);
+  cJSON_AddNumberToObject(pipeline, "dsp_rms_dbfs_x100",
+                          snapshot.pipeline.dsp.rms_dbfs_x100);
+  cJSON_AddNumberToObject(pipeline, "dsp_noise_floor_dbfs_x100",
+                          snapshot.pipeline.dsp.noise_floor_dbfs_x100);
+  cJSON_AddNumberToObject(pipeline, "dsp_low_band_dbfs_x100",
+                          snapshot.pipeline.dsp.low_band_dbfs_x100);
+  cJSON_AddNumberToObject(pipeline, "dsp_mid_band_dbfs_x100",
+                          snapshot.pipeline.dsp.mid_band_dbfs_x100);
+  cJSON_AddNumberToObject(pipeline, "dsp_high_band_dbfs_x100",
+                          snapshot.pipeline.dsp.high_band_dbfs_x100);
+  cJSON_AddNumberToObject(pipeline, "dsp_gate_gain_pct",
+                          snapshot.pipeline.dsp.gate_gain_pct);
+  cJSON_AddNumberToObject(pipeline, "dsp_compressor_gain_pct",
+                          snapshot.pipeline.dsp.compressor_gain_pct);
+  cJSON_AddNumberToObject(pipeline, "dsp_limiter_events",
+                          snapshot.pipeline.dsp.limiter_events);
 
   cJSON_AddItemToObject(result, "status", status);
   cJSON_AddItemToObject(result, "pipeline", pipeline);

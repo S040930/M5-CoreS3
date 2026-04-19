@@ -1,7 +1,7 @@
 <div align="center">
 <img src="docs/logo_airplay_esp32.png" alt="AirPlay ESP32" width="400">
 
-# ESP32 AirPlay 2 Receiver
+# ESP32 AirPlay 1 Receiver
 
 [![GitHub stars](https://img.shields.io/github/stars/rbouteiller/airplay-esp32?style=flat-square)](https://github.com/rbouteiller/airplay-esp32/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/rbouteiller/airplay-esp32?style=flat-square)](https://github.com/rbouteiller/airplay-esp32/network)
@@ -9,46 +9,46 @@
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.x-red?style=flat-square)](https://docs.espressif.com/projects/esp-idf/)
 [![Platform](https://img.shields.io/badge/hardware-M5Stack_Core_S3-green?style=flat-square)](https://docs.m5stack.com/en/core/CoreS3)
 
-**Stream music from your Apple devices over Wi‑Fi to a M5Stack Core S3 — AirPlay 2, no cloud, no extra app.**
+**Stream music from your Apple devices over Wi‑Fi to a M5Stack Core S3 — AirPlay 1, no cloud, no extra app.**
 
 </div>
 
 ---
 
-## What is this?
+## 项目概述
 
-This firmware turns a **[M5Stack Core S3](https://docs.m5stack.com/en/core/CoreS3)** (ESP32‑S3) into a wireless **AirPlay 2** speaker. It appears in Control Center on iPhone, iPad, and Mac like any AirPlay receiver. Audio plays on the board’s **built‑in speaker path** (AW88298 amplifier via the official BSP / `esp_codec_dev`).
+本项目将 **[M5Stack Core S3](https://docs.m5stack.com/en/core/CoreS3)** (ESP32‑S3) 开发板转变为无线 **AirPlay 1** 音箱。它会像其他 AirPlay 接收器一样出现在 iPhone、iPad 和 Mac 的控制中心中。音频通过开发板的 **内置扬声器路径**（通过官方 BSP / `esp_codec_dev` 驱动的 AW88298 放大器）播放。
 
-This repository is maintained for **Core S3 only**: onboard Wi‑Fi, USB‑C power, and captive‑portal setup. **Bluetooth Classic / A2DP is not used** on ESP32‑S3 (no Classic BT controller).
+本仓库专门维护 **Core S3** 平台：板载 Wi‑Fi、USB‑C 供电和 captive‑portal 配置。由于 ESP32‑S3 没有 Classic BT 控制器，**不使用 Bluetooth Classic / A2DP**。
 
-**No cloud. No app. Just tap and play.**
+**无需云服务。无需额外应用。只需点击播放。**
 
 ---
 
-## Hardware
+## 硬件要求
 
-| Item | Notes |
+| 项目 | 说明 |
 |------|--------|
-| **M5Stack Core S3** | ESP32‑S3, PSRAM, built‑in speaker amp — [M5 documentation](https://docs.m5stack.com/en/core/CoreS3) |
-| **USB‑C cable** | Power and serial flash |
+| **M5Stack Core S3** | ESP32‑S3 芯片，带 PSRAM，内置扬声器放大器 — [M5 文档](https://docs.m5stack.com/en/core/CoreS3) |
+| **USB‑C 线缆** | 用于供电和串行闪存 |
 
-No external DAC or PCM5102 wiring is required for the supported build.
+支持的构建版本不需要外部 DAC 或 PCM5102 接线。
 
 ---
 
-## Flash the Firmware
+## 刷写固件
 
-Three options: **Web flasher** (no install), **PlatformIO**, or **ESP-IDF**.
+三种选项：**Web 刷写器**（无需安装）、**PlatformIO** 或 **ESP-IDF**。
 
-### Option A — Web Flasher (beginners)
+### 选项 A — Web 刷写器（初学者）
 
-1. Download the latest **`airplay2-receiver-m5cores3.bin`** from the [Releases](https://github.com/rbouteiller/airplay-esp32/releases/latest) page.
-2. Open the [ESP Web Flasher](https://espressif.github.io/esptool-js/) (Chrome or Edge).
-3. Connect the Core S3 via USB, **Connect** → choose the serial port.
-4. Flash address **`0x0`**, select the `.bin`, **Program**.
-5. Power‑cycle the board; it boots into Wi‑Fi setup mode if not configured.
+1. 从 [Releases](https://github.com/rbouteiller/airplay-esp32/releases/latest) 页面下载最新的 **`airplay-receiver-m5cores3.bin`** 文件。
+2. 打开 [ESP Web Flasher](https://espressif.github.io/esptool-js/)（Chrome 或 Edge 浏览器）。
+3. 通过 USB 连接 Core S3，点击 **Connect** → 选择串口。
+4. 刷写地址设置为 **`0x0`**，选择下载的 `.bin` 文件，点击 **Program**。
+5. 重启开发板；如果未配置，它会进入 Wi‑Fi 设置模式。
 
-### Option B — PlatformIO
+### 选项 B — PlatformIO
 
 ```bash
 pip install platformio
@@ -61,13 +61,13 @@ pio run -e m5cores3 -t uploadfs --upload-port /dev/cu.usbmodemXXXX
 pio run -e m5cores3 -t monitor --upload-port /dev/cu.usbmodemXXXX
 ```
 
-Replace `/dev/cu.usbmodemXXXX` with your actual serial device (macOS: `ls /dev/cu.usb*`; avoid unrelated ports such as `Bluetooth-Incoming-Port`). On Windows use `COMn`.
+将 `/dev/cu.usbmodemXXXX` 替换为实际的串行设备（macOS：`ls /dev/cu.usb*`；避免使用无关端口，如 `Bluetooth-Incoming-Port`）。在 Windows 上使用 `COMn`。
 
-**Firmware vs SPIFFS:** `upload` writes the application only. The device web UI lives in the **`storage`** SPIFFS partition from [`data/www/`](data/www/). Without **`buildfs` + `uploadfs`**, logs may show `Failed to open /spiffs/www/index.html` and **0 bytes used** for SPIFFS. You can still manage Wi‑Fi and AirPlay pairing over **USB** using [`tools/usb_web/`](tools/usb_web/README.md) (see below).
+**固件与 SPIFFS：** `upload` 仅写入应用程序。设备 Web UI 存储在 **`storage`** SPIFFS 分区中，位于 [`data/www/`](data/www/)。如果不执行 **`buildfs` + `uploadfs`**，日志可能会显示 `Failed to open /spiffs/www/index.html` 和 SPIFFS **0 bytes used**。您仍然可以通过 **USB** 使用 [`tools/usb_web/`](tools/usb_web/README.md) 管理 Wi‑Fi（AirPlay 1 不需要配对）。
 
-The only predefined environment is **`m5cores3`** (see [`platformio.ini`](platformio.ini)).
+唯一预定义的环境是 **`m5cores3`**（见 [`platformio.ini`](platformio.ini)）。
 
-### Option C — ESP-IDF
+### 选项 C — ESP-IDF
 
 ```bash
 git clone --recursive https://github.com/rbouteiller/airplay-esp32
@@ -81,15 +81,15 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ---
 
-## Custom configuration (`user_platformio.ini`)
+## 自定义配置 (`user_platformio.ini`)
 
-You can add a **`user_platformio.ini`** (already merged via `extra_configs`) to override pins or features without editing the main config.
+您可以添加 **`user_platformio.ini`**（已通过 `extra_configs` 合并）来覆盖引脚或功能，而无需编辑主配置。
 
-1. Extend **`env:m5cores3`**.
-2. Add a **`sdkconfig.user.*`** file with Kconfig overrides (GPIOs, optional display, etc.).
-3. Chain defaults: `sdkconfig.defaults` → `sdkconfig.defaults.m5cores3` → your file (last wins).
+1. 扩展 **`env:m5cores3`**。
+2. 添加 **`sdkconfig.user.*`** 文件，包含 Kconfig 覆盖（GPIO、可选显示等）。
+3. 链式默认值：`sdkconfig.defaults` → `sdkconfig.defaults.m5cores3` → 您的文件（最后一个生效）。
 
-**Example `user_platformio.ini`:**
+**`user_platformio.ini` 示例：**
 
 ```ini
 [env:my-cores3]
@@ -98,122 +98,148 @@ board_build.cmake_extra_args =
     "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.m5cores3;sdkconfig.user.mycores3"
 ```
 
-Then: `pio run -e my-cores3 -t upload`
+然后执行：`pio run -e my-cores3 -t upload`
 
-`sdkconfig.user.*` files are intended to be gitignored so local tweaks stay private.
-
----
-
-## Setup (first boot)
-
-1. Power the Core S3 over USB‑C (a **data-capable** USB‑C cable is required for flash and [`tools/usb_web`](tools/usb_web/README.md); USB‑C to USB‑C to a full-featured computer port is fine).
-2. **Provisioning Wi‑Fi**
-   - **A — Captive portal (needs SPIFFS):** On a phone or PC, join Wi‑Fi **`ESP32-AirPlay-Setup`**, then open **http://192.168.4.1** and set a device name and home Wi‑Fi credentials.
-   - **B — USB (works even if SPIFFS was never flashed):** Run `python3 tools/usb_web/server.py`, open the printed URL in **Chrome or Edge**, **Connect Device** to the Core S3 serial port, then use the on-page Wi‑Fi tools. See [`tools/usb_web/README.md`](tools/usb_web/README.md). Close **PlatformIO Serial Monitor** before connecting Web Serial (only one program may open the port).
-3. After reboot on your LAN, use **AirPlay** from Control Center or any music app.
-
-### Why you might not see `ESP32-AirPlay-Setup`
-
-The firmware uses **STA-first** boot ([`main/network/wifi.c`](main/network/wifi.c)): if valid STA credentials are stored and the device **connects within ~30s**, it stays in **station-only** mode and **does not** start the setup SoftAP. That is expected when the saved network is reachable.
-
-**Ways to enter setup / SoftAP again:** erase flash/NVS and reflash, move the device out of range of the saved SSID until connection fails, clear saved Wi‑Fi from the device web UI (once SPIFFS works) or from the **USB** page, or wait for repeated connection failures until the firmware re-enables the AP (see Wi‑Fi code paths).
-
-If connection fails repeatedly, the device can return to setup mode so you can reconfigure.
+`sdkconfig.user.*` 文件旨在被 git 忽略，以便本地调整保持私有。
 
 ---
 
-## USB Web Serial management (no device web files required)
+## 首次启动设置
 
-For M5Stack Core S3, the firmware can speak a JSON **control channel** over the USB Serial/JTAG console (`@usbctl` lines). A small local server serves a Chromium **Web Serial** UI:
+1. 通过 USB‑C 为 Core S3 供电（需要 **支持数据传输** 的 USB‑C 线缆用于刷写和 [`tools/usb_web`](tools/usb_web/README.md)；USB‑C 到 USB‑C 连接到全功能计算机端口即可）。
+2. **配置 Wi‑Fi**
+   - **A — Captive portal（需要 SPIFFS）：** 在手机或电脑上，连接 Wi‑Fi **`ESP32-AirPlay-Setup`**，然后打开 **http://192.168.4.1** 并设置设备名称和家庭 Wi‑Fi 凭证。
+   - **B — USB（即使未刷写 SPIFFS 也可工作）：** 运行 `python3 tools/usb_web/server.py`，在 **Chrome 或 Edge** 中打开打印的 URL，**Connect Device** 到 Core S3 串口，然后使用页面上的 Wi‑Fi 工具。请参阅 [`tools/usb_web/README.md`](tools/usb_web/README.md)。在连接 Web Serial 之前关闭 **PlatformIO Serial Monitor**（只有一个程序可以打开端口）。
+3. 在 LAN 上重启后，从控制中心或任何音乐应用程序使用 **AirPlay**。
+
+### 为什么您可能看不到 `ESP32-AirPlay-Setup`
+
+固件使用 **STA-first** 启动（[`main/network/wifi.c`](main/network/wifi.c)）：如果存储了有效的 STA 凭证且设备在 **~30 秒内** 连接，它会保持在 **仅 station** 模式，**不会** 启动设置 SoftAP。当保存的网络可达时，这是预期行为。
+
+**重新进入设置 / SoftAP 的方法：** 擦除闪存/NVS 并重新刷写，将设备移出保存的 SSID 范围直到连接失败，从设备 Web UI（一旦 SPIFFS 工作）或从 **USB** 页面清除保存的 Wi‑Fi，或等待重复连接失败直到固件重新启用 AP（见 Wi‑Fi 代码路径）。
+
+如果连接反复失败，设备可以返回设置模式以便您重新配置。
+
+---
+
+## USB Web Serial 管理（无需设备 Web 文件）
+
+对于 M5Stack Core S3，固件可以通过 USB Serial/JTAG 控制台（`@usbctl` 行）使用 JSON **控制通道**。一个小型本地服务器提供 Chromium **Web Serial** UI：
 
 ```bash
 python3 tools/usb_web/server.py
-# Open http://127.0.0.1:8765/index.html — use Chrome or Edge
+# 打开 http://127.0.0.1:8765/index.html — 使用 Chrome 或 Edge
 ```
 
-This path **does not** depend on SPIFFS or on opening the receiver at `http://<device-ip>/` in a browser. The Core S3 may have **two USB‑C jacks**; use the one that enumerates as your usual flash/monitor serial port. See [`tools/usb_web/README.md`](tools/usb_web/README.md) for scope (Wi‑Fi, device name, restart, AirPlay pairing reset, clear Wi‑Fi).
+此路径 **不** 依赖于 SPIFFS 或在浏览器中打开接收器的 `http://<device-ip>/`。Core S3 可能有 **两个 USB‑C 接口**；使用枚举为通常的刷写/监控串口的接口。请参阅 [`tools/usb_web/README.md`](tools/usb_web/README.md) 了解范围（Wi‑Fi、设备名称、重启、清除 Wi‑Fi）。
 
 ---
 
-## Updating firmware (OTA)
+## 固件更新（OTA）
 
-When the device is on your LAN, you can upload a new firmware image from its web UI (diagnostics/OTA features depend on your `sdkconfig`; see project options).
+当设备在您的 LAN 上时，您可以从其 Web UI 上传新的固件映像（诊断/OTA 功能取决于您的 `sdkconfig`；请参阅项目选项）。
 
 ---
 
-## SPIFFS and `data/`
+## SPIFFS 和 `data/`
 
-A **`storage`** SPIFFS partition holds the **on-device** web assets under **`data/www/`** (captive portal and status pages). Layout is defined in [`components/boards/partitions.csv`](components/boards/partitions.csv).
+**`storage`** SPIFFS 分区存储 **设备上** 的 Web 资产，位于 **`data/www/`**（captive portal 和状态页面）。布局在 [`components/boards/partitions.csv`](components/boards/partitions.csv) 中定义。
 
-**PlatformIO:** after flashing the app, build and upload the filesystem (same `--upload-port` as `upload`):
+**PlatformIO：** 刷写应用程序后，构建并上传文件系统（与 `upload` 使用相同的 `--upload-port`）：
 
 ```bash
 pio run -e m5cores3 -t buildfs
 pio run -e m5cores3 -t uploadfs --upload-port /dev/cu.usbmodemXXXX
 ```
 
-Until SPIFFS is written, the HTTP server may return **404** for `/` and logs may show **SPIFFS … 0 bytes used**. Use **[USB Web Serial management](#usb-web-serial-management-no-device-web-files-required)** to configure the device without the on-device pages.
+在写入 SPIFFS 之前，HTTP 服务器可能会为 `/` 返回 **404**，日志可能会显示 **SPIFFS … 0 bytes used**。使用 **[USB Web Serial 管理](#usb-web-serial-management-no-device-web-files-required)** 在没有设备页面的情况下配置设备。
 
 ---
 
-## Optional features (menuconfig)
+## 可选功能（menuconfig）
 
-| Feature | Notes |
+| 功能 | 说明 |
 |--------|--------|
-| **OLED display** | Disabled by default on Core S3 (`CONFIG_DISPLAY_ENABLED`). Enable under *AirPlay ESP Configuration* / display options if wired. |
-| **W5500 Ethernet** | Optional; enable `CONFIG_ETH_W5500_ENABLED` and set SPI pins under *Board Configuration* if you add a module. |
-| **Hardware buttons** | GPIOs default to disabled; configure under *Button Configuration*. AirPlay 2 vs DACP behavior is documented in older upstream docs; volume still applies locally. |
+| **OLED 显示** | 在 Core S3 上默认禁用 (`CONFIG_DISPLAY_ENABLED`)。如果连接了显示设备，在 *AirPlay ESP Configuration* / 显示选项下启用。 |
+| **W5500 以太网** | 可选；如果添加模块，启用 `CONFIG_ETH_W5500_ENABLED` 并在 *Board Configuration* 下设置 SPI 引脚。 |
+| **硬件按钮** | GPIO 默认禁用；在 *Button Configuration* 下配置。AirPlay 1 与 DACP 行为在较早的上游文档中有记录；音量仍在本地应用。 |
 
 ---
 
-## Features
+## 功能特性
 
-- **AirPlay 2** — discovery, pairing, encrypted audio path where applicable
-- **ALAC & AAC** — realtime and buffered playback paths
-- **PTP-style timing** — multi-room friendly buffering
-- **Web setup** — captive portal and status (as enabled in config)
-- **RGB status LED** — Core S3 uses the configured WS2812 GPIO when set
+- **AirPlay 1**（经典 RAOP）— 发现、加密音频路径
+- **ALAC & AAC** — 实时播放路径
+- **NTP 风格计时** — 多房间友好的同步
+- **Web 设置** — captive portal 和状态（按配置启用）
+- **RGB 状态 LED** — Core S3 在设置时使用配置的 WS2812 GPIO
+- **音频处理** — 包含音频缓冲、解码、重采样和 DSP 处理
+- **网络功能** — Wi‑Fi 管理、mDNS 服务发现、Web 服务器
+- **USB 控制** — 通过 USB Serial 进行设备管理
+- **OTA 更新** — 通过 Web UI 进行固件更新
 
-### Limitations
+### 限制
 
-- Audio only (no AirPlay video/screen mirroring)
-- **No Bluetooth Classic A2DP** on this chip/target
-- One active AirPlay session per device; Wi‑Fi quality affects stability
+- 仅音频（无 AirPlay 视频/屏幕镜像）
+- **此芯片/目标上无 Bluetooth Classic A2DP**
+- 每个设备一次只能有一个活动的 AirPlay 会话；Wi‑Fi 质量会影响稳定性
 
 ---
 
-## Technical overview
+## 技术概述
 
 ```
-iPhone / iPad / Mac  ── Wi‑Fi ──►  ESP32‑S3 (Core S3)  ──►  AW88298 / internal speaker path
+iPhone / iPad / Mac  ── Wi‑Fi ──►  ESP32‑S3 (Core S3)  ──►  AW88298 / 内部扬声器路径
 ```
 
-Key code areas:
+## 文档索引
 
-| Area | Path |
+| 主题 | 摘要 | 路径 |
+|------|------|------|
+| 音频质量优化 | 播放路径根本原因模型、实现的 DSP 强化、新诊断以及 SNR/THD/频率响应测试的验证指南 | `docs/audio_quality_optimization.md` |
+
+关键代码区域：
+
+| 区域 | 路径 |
 |------|------|
 | RTSP / AirPlay | `main/rtsp/` |
-| HAP pairing | `main/hap/` |
-| Audio pipeline | `main/audio/` |
-| Board init | `components/boards/m5stack-core-s3/` |
-| Output (Core S3) | `main/audio/audio_output_cores3.c` |
-| Wi‑Fi / mDNS / web | `main/network/` |
+| 音频处理 | `main/audio/` |
+| 开发板初始化 | `components/boards/m5stack-core-s3/` |
+| 输出（Core S3） | `main/audio/audio_output_cores3.c` |
+| 网络功能 | `main/network/` |
+| USB 控制 | `main/usb_control_service.c` |
+| 状态管理 | `main/receiver_state.c` |
+| 播放控制 | `main/playback_control.c` |
+| 系统操作 | `main/system_actions.c` |
 
-Legacy **DAC** components (`dac_tas57xx`, `dac_tas58xx`) remain in the tree for reference but are **not** selected in the default **m5cores3** build.
-
----
-
-## Acknowledgements
-
-- **[Shairport Sync](https://github.com/mikebrady/shairport-sync)** — reference AirPlay behavior
-- **[openairplay/airplay2-receiver](https://github.com/openairplay/airplay2-receiver)** — Python AirPlay 2 research
-- **[Espressif](https://github.com/espressif)** — ESP-IDF and audio codecs
-- **[M5Stack](https://m5stack.com/)** — Core S3 hardware and BSP
+传统 **DAC** 组件（`dac_tas57xx`、`dac_tas58xx`）仍在代码树中作为参考，但在默认 **m5cores3** 构建中 **未** 被选择。
 
 ---
 
-## Legal
+## 贡献指南
 
-**Non-commercial use only.** Commercial use requires explicit permission. See [LICENSE](LICENSE).
+我们欢迎社区贡献！如果您想为项目做出贡献，请遵循以下步骤：
 
-Independent project based on protocol research. Not affiliated with Apple Inc. Not guaranteed against future iOS/macOS changes. Provided as-is without warranty.
+1. Fork 本仓库
+2. 创建您的特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交您的更改 (`git commit -m 'Add some amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 打开一个 Pull Request
+
+请确保您的代码符合项目的代码风格和质量标准。
+
+---
+
+## 致谢
+
+- **[Shairport Sync](https://github.com/mikebrady/shairport-sync)** — AirPlay 行为参考
+- **[Espressif](https://github.com/espressif)** — ESP-IDF 和音频编解码器
+- **[M5Stack](https://m5stack.com/)** — Core S3 硬件和 BSP
+
+---
+
+## 许可证信息
+
+**仅供非商业使用。** 商业使用需要明确许可。请参阅 [LICENSE](LICENSE)。
+
+基于协议研究的独立项目。与 Apple Inc. 无关。不保证与未来 iOS/macOS 更改兼容。按原样提供，不提供任何保证。

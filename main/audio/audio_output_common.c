@@ -1,6 +1,7 @@
 #include "audio_output_common.h"
 
 #include "audio_pipeline.h"
+#include "audio_dsp.h"
 #include "audio_eq.h"
 #include "audio_receiver.h"
 #include "audio_resample.h"
@@ -16,10 +17,10 @@
 // Reserve headroom to reduce clipping at loud passages.
 #define OUTPUT_HEADROOM_Q15 21900
 #define CLIP_RISK_PEAK      30000
-#define HF_SMOOTH_ENABLE    1
-#define HF_SMOOTH_BLEND_Q15 22938
 #define EQ_RELOAD_PEAK_GUARD 22000
 #define EQ_RELOAD_MAX_DEFER  12
+#define GAP_CONCEAL_REPEAT_MAX 6
+#define GAP_CONCEAL_FADE_Q15   26214
 
 static const audio_output_hw_ops_t *s_ops = NULL;
 static volatile bool flush_requested = false;
@@ -76,40 +77,30 @@ static void maybe_log_gain_path(void) {
            (long)effective_q15);
 }
 
-#if HF_SMOOTH_ENABLE
-// Single-pole smoothing filter to tame harsh upper frequencies.
-// Uses independent states for L/R interleaved stereo samples.
-static void apply_hf_smoothing(int16_t *buf, size_t n) {
-  static int32_t state_l = 0;
-  static int32_t state_r = 0;
+static void apply_concealment_fade(int16_t *buf, size_t sample_count,
+                                   uint8_t repeat_index) {
+  int32_t gain_q15 = 32768;
+  for (uint8_t i = 0; i < repeat_index; ++i) {
+    gain_q15 = (gain_q15 * GAP_CONCEAL_FADE_Q15) >> 15;
+  }
 
-  for (size_t i = 0; i + 1 < n; i += 2) {
-    int32_t sample_l = (int32_t)buf[i];
-    int32_t sample_r = (int32_t)buf[i + 1];
-
-    state_l += ((sample_l - state_l) * HF_SMOOTH_BLEND_Q15) >> 15;
-    state_r += ((sample_r - state_r) * HF_SMOOTH_BLEND_Q15) >> 15;
-
-    buf[i] = (int16_t)state_l;
-    buf[i + 1] = (int16_t)state_r;
+  for (size_t i = 0; i < sample_count; ++i) {
+    buf[i] = (int16_t)(((int32_t)buf[i] * gain_q15) >> 15);
   }
 }
-#else
-static inline void apply_hf_smoothing(int16_t *buf, size_t n) {
-  (void)buf;
-  (void)n;
-}
-#endif
 
 static void playback_task(void *arg) {
   int16_t *pcm = malloc((size_t)(AO_FRAME_SAMPLES + 1) * 2 * sizeof(int16_t));
   int16_t *silence = calloc((size_t)AO_FRAME_SAMPLES * 2, sizeof(int16_t));
   int16_t *resample_buf = malloc(AO_MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t));
+  int16_t *last_good_buf = calloc((size_t)AO_MAX_RESAMPLE_FRAMES * 2,
+                                  sizeof(int16_t));
   if (!pcm || !silence || !resample_buf) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
     free(pcm);
     free(silence);
     free(resample_buf);
+    free(last_good_buf);
     playback_running = false;
     playback_task_handle = NULL;
     vTaskDelete(NULL);
@@ -117,6 +108,9 @@ static void playback_task(void *arg) {
   }
 
   audio_eq_init((uint32_t)AO_OUTPUT_RATE);
+  audio_dsp_init((uint32_t)AO_OUTPUT_RATE);
+  size_t last_good_samples = 0;
+  uint8_t concealment_repeats = 0;
 
   while (playback_running) {
     uint64_t loop_start_us = (uint64_t)esp_timer_get_time();
@@ -142,8 +136,13 @@ static void playback_task(void *arg) {
         play_buf = resample_buf;
       }
       apply_volume(play_buf, play_samples * 2);
-      apply_hf_smoothing(play_buf, play_samples * 2);
       audio_eq_process(play_buf, play_samples * 2);
+      audio_dsp_process(play_buf, play_samples * 2);
+      if (last_good_buf && play_samples > 0) {
+        memcpy(last_good_buf, play_buf, play_samples * 2 * sizeof(int16_t));
+        last_good_samples = play_samples * 2;
+      }
+      concealment_repeats = 0;
       maybe_log_gain_path();
 
       // Poll persisted EQ occasionally to pick up profile changes.
@@ -197,8 +196,19 @@ static void playback_task(void *arg) {
                  audio_receiver_anchor_valid());
       }
       if (s_ops && s_ops->write_pcm) {
-        s_ops->write_pcm(s_ops->ctx, silence,
-                         (size_t)AO_FRAME_SAMPLES * 4, pdMS_TO_TICKS(10));
+        if (last_good_buf && last_good_samples > 0 &&
+            concealment_repeats < GAP_CONCEAL_REPEAT_MAX) {
+          apply_concealment_fade(last_good_buf, last_good_samples,
+                                 concealment_repeats);
+          s_ops->write_pcm(s_ops->ctx, last_good_buf,
+                           last_good_samples * sizeof(int16_t),
+                           pdMS_TO_TICKS(10));
+          audio_pipeline_note_gap_concealment(concealment_repeats == 0);
+          concealment_repeats++;
+        } else {
+          s_ops->write_pcm(s_ops->ctx, silence,
+                           (size_t)AO_FRAME_SAMPLES * 4, pdMS_TO_TICKS(10));
+        }
       }
       audio_pipeline_note_playback_busy(
           (uint32_t)((uint64_t)esp_timer_get_time() - loop_start_us));
@@ -209,6 +219,7 @@ static void playback_task(void *arg) {
   free(pcm);
   free(silence);
   free(resample_buf);
+  free(last_good_buf);
   playback_running = false;
   playback_task_handle = NULL;
   vTaskDelete(NULL);
