@@ -7,6 +7,7 @@
  * Provides:
  * - WiFi configuration
  * - Device name configuration
+ * - WiFi credential reset
  * - OTA update
  */
 

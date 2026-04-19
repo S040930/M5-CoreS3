@@ -4,6 +4,11 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "cJSON.h"
+#include "esp_err.h"
+
+#include "network/structured_trace.h"
+
 #define MAX_LISTENERS 4
 
 typedef struct {
@@ -46,6 +51,25 @@ void rtsp_events_unregister(rtsp_event_callback_t callback) {
 }
 
 void rtsp_events_emit(rtsp_event_t event, const rtsp_event_data_t *data) {
+  cJSON *details = cJSON_CreateObject();
+  if (details) {
+    cJSON_AddNumberToObject(details, "event", (double)event);
+    if (data && event == RTSP_EVENT_METADATA) {
+      cJSON_AddStringToObject(details, "title", data->metadata.title);
+      cJSON_AddStringToObject(details, "artist", data->metadata.artist);
+      cJSON_AddStringToObject(details, "album", data->metadata.album);
+      cJSON_AddNumberToObject(details, "duration_secs",
+                              (double)data->metadata.duration_secs);
+      cJSON_AddNumberToObject(details, "position_secs",
+                              (double)data->metadata.position_secs);
+      cJSON_AddBoolToObject(details, "has_artwork",
+                            data->metadata.has_artwork);
+    }
+    structured_trace_emit("rtsp", "event", ESP_OK, 0, 0, 0, NULL,
+                          details);
+    cJSON_Delete(details);
+  }
+
   for (int i = 0; i < listener_count; i++) {
     listeners[i].callback(event, data, listeners[i].user_data);
   }

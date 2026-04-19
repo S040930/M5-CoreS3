@@ -1,5 +1,11 @@
 set( SRC_FILES
     "main.c"
+    "receiver_state.c"
+    "status_service.c"
+    "airplay_service.c"
+    "audio_pipeline.c"
+    "system_actions.c"
+    "usb_control_service.c"
     "alac_magic_cookie.c"
     "settings.c"
     "audio/audio_receiver.c"
@@ -15,47 +21,29 @@ set( SRC_FILES
     "rtsp/rtsp_conn.c"
     "rtsp/rtsp_message.c"
     "rtsp/rtsp_handlers.c"
-    "rtsp/rtsp_fairplay.c"
-    "rtsp/rtsp_crypto.c"
     "rtsp/rtsp_rsa.c"
     "rtsp/rtsp_events.c"
     "plist/plist_xml.c"
     "plist/bplist_parser.c"
     "plist/bplist_builder.c"
     "plist/base64.c"
-    "hap/hap.c"
-    "hap/hap_pair_verify.c"
-    "hap/hap_pair_setup.c"
-    "hap/hap_crypto.c"
-    "hap/srp.c"
-    "hap/tlv8.c"
     "network/wifi.c"
     "network/mdns_airplay.c"
-    "network/ptp_clock.c"
     "network/ntp_clock.c"
     "network/socket_utils.c"
     "network/web_server.c"
     "network/ota.c"
     "network/dns_server.c"
     "network/log_stream.c"
+    "network/structured_trace.c"
     "led.c"
     "audio/eq_events.c"
+    "audio/audio_output_common.c"
+    "audio/audio_output_cores3.c"
     "buttons.c"
     "playback_control.c"
     "dacp_client.c"
 )
-
-# Select audio output implementation at compile time
-if(CONFIG_SPDIF_OUTPUT)
-    list(APPEND SRC_FILES "audio/audio_output_spdif.c")
-else()
-    list(APPEND SRC_FILES "audio/audio_output.c")
-endif()
-
-# Bluetooth A2DP sink (only available on ESP32 with Classic BT)
-if(CONFIG_BT_A2DP_ENABLE)
-    list(APPEND SRC_FILES "audio/a2dp_sink.c")
-endif()
 
 # W5500 SPI Ethernet
 if(CONFIG_ETH_W5500_ENABLED)
@@ -63,11 +51,10 @@ if(CONFIG_ETH_W5500_ENABLED)
 endif()
 
 set( INC_DIRS
-    "." 
-    "audio" 
-    "rtsp" 
-    "plist" 
-    "hap" 
+    "."
+    "audio"
+    "rtsp"
+    "plist"
     "network"
 )
 
@@ -88,31 +75,23 @@ set( DEPS
     esp_driver_ledc
     boards
     dac
-    dac_tas58xx
     display
     audio-resampler
-    esp_eth
+    esp_codec_dev
+    m5stack_core_s3_noglib
     spiffs_storage
 )
 
-# TODO: why these fall over in CI and fine locally...
-# Bluetooth component only needed when A2DP is enabled
-#if(CONFIG_BT_A2DP_ENABLE)
+if(CONFIG_BT_A2DP_ENABLE)
     list(APPEND DEPS bt)
-#endif()
+endif()
 
-# Ethernet component only needed when W5500 is enabled
-#if(CONFIG_ETH_W5500_ENABLED)
+if(CONFIG_ETH_W5500_ENABLED)
     list(APPEND DEPS esp_eth)
-#endif()
+endif()
 
 idf_component_register(
     SRCS ${SRC_FILES}
     INCLUDE_DIRS ${INC_DIRS}
     PRIV_REQUIRES ${DEPS}
 )
-
-# Enable function wrapping for abort() to intercept panics and mute GPIO
-if(CONFIG_BOARD_SQUEEZEAMP_COMMON)
-    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=abort")
-endif()

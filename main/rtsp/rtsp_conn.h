@@ -3,8 +3,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "hap.h"
-
 /**
  * RTSP Connection State Management
  * Consolidates all session state for an AirPlay connection
@@ -17,10 +15,6 @@ typedef struct rtsp_conn rtsp_conn_t;
  * Connection state struct - consolidates all session state
  */
 struct rtsp_conn {
-  // HAP session for pairing/encryption
-  hap_session_t *hap_session;
-  bool encrypted_mode;
-
   // Volume control: Q15 fixed-point (0-32768)
   // 32768 = 0 dB (unity), 0 = mute
   volatile int32_t volume_q15;
@@ -49,6 +43,7 @@ struct rtsp_conn {
   int sample_rate;
   int channels;
   int bits_per_sample;
+  bool announce_ready; // Set true only after a valid ANNOUNCE parse
 
   // DACP identifiers for sending commands back to the client
   char dacp_id[32];       // DACP-ID header (hex string)

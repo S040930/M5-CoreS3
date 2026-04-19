@@ -7,7 +7,6 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "ntp_clock.h"
-#include "ptp_clock.h"
 
 #define DEFAULT_BUFFER_LATENCY_US     200000 // 200ms startup jitter buffer
 #define HARDWARE_OUTPUT_LATENCY_US    46000  // ~46ms I2S DMA latency
@@ -37,15 +36,25 @@
 // and must be discarded rather than played.  10 s is well above the deepest
 // observed AirPlay 2 pre-buffer depth and well below any real seek delta.
 #define POST_FLUSH_STALE_THRESHOLD_US 10000000LL // 10 seconds
-// POST_FLUSH_TIMEOUT_US: maximum duration of the post_flush bypass.  After a
-// seek/flush the phone's pre-buffer window causes frames to appear hundreds of
-// ms early.  We play them immediately for this duration so the user hears audio
-// right away, then revert to normal timing so the anchor can enforce A/V sync.
-#define POST_FLUSH_TIMEOUT_US 500000LL // 500 ms
+#define LOCAL_ANCHOR_FALLBACK_US 300000LL
+#define NTP_EPOCH_OFFSET_SECONDS 2208988800ULL
 
 static const char *TAG = "audio_time";
-// consecutive_early_frames is now a field in audio_timing_t so it resets
-// automatically whenever a new anchor is set.
+// consecutive_early_frames resets on seek/discontinuity (see anchor_rtp_discontinuity)
+// and in audio_timing_reset / force_local_anchor, not on every 0xD4 refresh.
+
+static const char *anchor_source_name(audio_anchor_source_t source) {
+  switch (source) {
+  case AUDIO_ANCHOR_SOURCE_LOCAL:
+    return "local";
+  case AUDIO_ANCHOR_SOURCE_NTP:
+    return "ntp";
+  case AUDIO_ANCHOR_SOURCE_PTP:
+    return "ptp";
+  default:
+    return "none";
+  }
+}
 
 static uint32_t frame_samples_from_format(const audio_format_t *format) {
   if (format->frame_size > 0) {
@@ -100,9 +109,8 @@ static bool compute_early_us(const audio_timing_t *timing,
   int64_t target_ns;
   switch (sync_mode) {
   case SYNC_MODE_PTP:
-    // AirPlay 2: use network time with PTP offset for multi-room sync
-    target_ns = (int64_t)timing->anchor_network_time_ns -
-                ptp_clock_get_offset_ns() + frame_offset_ns;
+    // PTP not used in AirPlay 1 — fall through to NTP
+    target_ns = (int64_t)timing->anchor_network_time_ns + frame_offset_ns;
     break;
   case SYNC_MODE_NTP:
     // AirPlay 1: use network time with NTP offset for multi-room sync
@@ -120,6 +128,9 @@ static bool compute_early_us(const audio_timing_t *timing,
   target_ns -= (int64_t)HARDWARE_OUTPUT_LATENCY_US * 1000LL;
 
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
+  if (sync_mode == SYNC_MODE_NTP) {
+    now_ns += (int64_t)NTP_EPOCH_OFFSET_SECONDS * 1000000000LL;
+  }
   *early_us = (target_ns - now_ns) / 1000LL;
 
   return true;
@@ -133,6 +144,8 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   memset(timing, 0, sizeof(*timing));
   timing->output_latency_us = DEFAULT_BUFFER_LATENCY_US;
   timing->playing = true;
+  timing->anchor_source = AUDIO_ANCHOR_SOURCE_NONE;
+  timing->ntp_offset_sane = true;
 
   if (pending_capacity > 0) {
     timing->pending_frame = (uint8_t *)malloc(pending_capacity);
@@ -149,6 +162,9 @@ void audio_timing_reset(audio_timing_t *timing) {
 
   timing->playout_started = false;
   timing->anchor_valid = false;
+  timing->anchor_source = AUDIO_ANCHOR_SOURCE_NONE;
+  timing->control_sync_seen = false;
+  timing->ntp_offset_sane = true;
   timing->pending_valid = false;
   timing->pending_frame_len = 0;
   timing->ready_time_us = 0;
@@ -192,6 +208,22 @@ uint32_t audio_timing_get_hardware_latency(void) {
   return HARDWARE_OUTPUT_LATENCY_US;
 }
 
+// True if the new anchor RTP is far from the previous one (seek / new stream).
+// Periodic AirPlay v1 sync (0xD4) advances RTP smoothly — do not reset early/late
+// counters on those updates, or the stuck-anchor escape never accumulates.
+static bool anchor_rtp_discontinuity(const audio_timing_t *timing,
+                                     const audio_format_t *format,
+                                     uint32_t new_rtp) {
+  if (!timing->anchor_valid) {
+    return true;
+  }
+  int32_t d = (int32_t)(new_rtp - timing->anchor_rtp_time);
+  uint32_t absd = d < 0 ? (uint32_t)(-d) : (uint32_t)d;
+  uint32_t sr = format->sample_rate > 0 ? format->sample_rate : 44100;
+  const uint32_t threshold = 5 * sr; // 5 s of samples — seek vs ~1 Hz sync
+  return absd > threshold;
+}
+
 void audio_timing_set_anchor(audio_timing_t *timing,
                              const audio_format_t *format, uint64_t clock_id,
                              uint64_t network_time_ns, uint32_t rtp_time) {
@@ -203,15 +235,45 @@ void audio_timing_set_anchor(audio_timing_t *timing,
 
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
 
+  bool reset_early_late = anchor_rtp_discontinuity(timing, format, rtp_time);
+  if (reset_early_late) {
+    timing->consecutive_early_frames = 0;
+    timing->consecutive_late_frames = 0;
+  }
+
   timing->anchor_rtp_time = rtp_time;
   timing->anchor_network_time_ns = network_time_ns;
   timing->anchor_local_time_ns = now_ns;
-  timing->ptp_locked = ptp_clock_is_locked();
+  timing->ptp_locked = false; // AirPlay 1 uses NTP, not PTP
   timing->anchor_valid = true;
-  // Reset frame counters so pre-buffered audio after a pause/resume or
-  // track skip does not accumulate into the new anchor's counts.
+  timing->control_sync_seen = true;
+  timing->anchor_source =
+      clock_id != 0 ? AUDIO_ANCHOR_SOURCE_PTP : AUDIO_ANCHOR_SOURCE_NTP;
+  ESP_LOGI(TAG,
+           "Anchor established: source=%s rtp=%" PRIu32
+           " net_ns=%" PRIu64 " local_ns=%" PRId64,
+           anchor_source_name((audio_anchor_source_t)timing->anchor_source),
+           rtp_time, network_time_ns, now_ns);
+}
+
+void audio_timing_force_local_anchor(audio_timing_t *timing,
+                                     const audio_format_t *format,
+                                     uint32_t rtp_time) {
+  if (!timing || !format) {
+    return;
+  }
+
+  timing->anchor_rtp_time = rtp_time;
+  timing->anchor_network_time_ns = 0;
+  timing->anchor_local_time_ns =
+      ((int64_t)esp_timer_get_time() * 1000LL) +
+      ((int64_t)HARDWARE_OUTPUT_LATENCY_US * 1000LL);
+  timing->anchor_valid = true;
+  timing->anchor_source = AUDIO_ANCHOR_SOURCE_LOCAL;
+  timing->ntp_offset_sane = false;
   timing->consecutive_early_frames = 0;
   timing->consecutive_late_frames = 0;
+  ESP_LOGW(TAG, "Local anchor fallback engaged: rtp=%" PRIu32, rtp_time);
 }
 
 void audio_timing_set_playing(audio_timing_t *timing, bool playing) {
@@ -259,17 +321,27 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         timing->ready_time_us = now_us;
       }
       if (now_us - timing->ready_time_us < 1000000) {
-        return 0; // Still waiting for anchor
+        if (!timing->post_flush &&
+            (now_us - timing->ready_time_us) >= LOCAL_ANCHOR_FALLBACK_US) {
+          uint32_t oldest_rtp = 0;
+          if (audio_buffer_oldest_timestamp(buffer, &oldest_rtp)) {
+            audio_timing_force_local_anchor(timing, format, oldest_rtp);
+          } else {
+            return 0;
+          }
+        } else {
+          return 0; // Still waiting for anchor
+        }
       }
       // Waited 1 second, no anchor - proceed without sync
     }
   }
 
-  // Determine sync mode: PTP (AirPlay 2), NTP (AirPlay 1), or local fallback
+  // Determine sync mode: NTP (AirPlay 1) or local fallback
   sync_mode_t sync_mode = SYNC_MODE_NONE;
-  if (ptp_clock_is_locked()) {
-    sync_mode = SYNC_MODE_PTP;
-  } else if (ntp_clock_is_locked()) {
+  timing->ntp_offset_sane = ntp_clock_has_sane_offset();
+  if (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP &&
+      ntp_clock_is_locked() && timing->ntp_offset_sane) {
     sync_mode = SYNC_MODE_NTP;
   }
 
@@ -421,15 +493,12 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             // buffer will play immediately rather than waiting out the anchor.
             return 0;
           }
-          // Within pre-buffer depth — play and check if we should exit.
-          // Exit post_flush when either:
-          //  1. early is within ±TIMING_THRESHOLD_US (anchor is on-time), or
-          //  2. POST_FLUSH_TIMEOUT_US has elapsed (pre-buffer depth exceeds
-          //     threshold but anchor is stable — let normal timing take over
-          //     so frames are held until their scheduled play point).
-          if ((early_us >= -TIMING_THRESHOLD_US &&
-               early_us <= TIMING_THRESHOLD_US) ||
-              flush_elapsed >= POST_FLUSH_TIMEOUT_US) {
+          // Within pre-buffer depth — keep playing until the anchor is
+          // genuinely on-time. Exiting early while frames are still ~seconds
+          // ahead re-enables the 40 ms early gate and turns valid audio into
+          // sustained silence (peak=0).
+          if (early_us >= -TIMING_THRESHOLD_US &&
+              early_us <= TIMING_THRESHOLD_US) {
             ESP_LOGI(TAG, "post_flush done: early=%lld ms, elapsed=%lld ms",
                      early_us / 1000LL, flush_elapsed / 1000LL);
             timing->post_flush = false;
@@ -555,4 +624,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
   }
 
   return 0;
+}
+
+bool audio_timing_is_anchor_valid(const audio_timing_t *timing) {
+  return timing && timing->anchor_valid;
 }

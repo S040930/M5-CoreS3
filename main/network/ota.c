@@ -1,6 +1,7 @@
 #include "ota.h"
 
 #include "esp_app_format.h"
+#include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -10,14 +11,75 @@
 
 static const char *TAG = "ota";
 
-/**
- * Validate an in-memory firmware image before writing to flash.
- * Checks: minimum size, magic byte, segment count, and SHA-256 digest
- * (when the image indicates a hash is appended).
- */
-static esp_err_t ota_validate_image(const uint8_t *image, size_t len) {
-  if (len < sizeof(esp_image_header_t)) {
-    ESP_LOGE(TAG, "Image too small (%zu bytes)", len);
+static int compare_version_strings(const char *lhs, const char *rhs) {
+  if (!lhs || !rhs) {
+    return 0;
+  }
+
+  while (*lhs != '\0' || *rhs != '\0') {
+    char *lhs_end = NULL;
+    char *rhs_end = NULL;
+    long lhs_part = strtol(lhs, &lhs_end, 10);
+    long rhs_part = strtol(rhs, &rhs_end, 10);
+
+    if (lhs_end == lhs) {
+      lhs_part = 0;
+      lhs_end = (char *)lhs;
+      while (*lhs_end != '\0' && *lhs_end != '.') {
+        lhs_end++;
+      }
+    }
+    if (rhs_end == rhs) {
+      rhs_part = 0;
+      rhs_end = (char *)rhs;
+      while (*rhs_end != '\0' && *rhs_end != '.') {
+        rhs_end++;
+      }
+    }
+
+    if (lhs_part != rhs_part) {
+      return lhs_part > rhs_part ? 1 : -1;
+    }
+
+    lhs = *lhs_end == '.' ? lhs_end + 1 : lhs_end;
+    rhs = *rhs_end == '.' ? rhs_end + 1 : rhs_end;
+    if (*lhs == '\0' && *rhs == '\0') {
+      break;
+    }
+  }
+  return 0;
+}
+
+static esp_err_t ota_validate_version_policy(const uint8_t *image, size_t len) {
+  size_t desc_offset =
+      sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+  if (len < desc_offset + sizeof(esp_app_desc_t)) {
+    return ESP_ERR_INVALID_SIZE;
+  }
+
+  const esp_app_desc_t *new_desc =
+      (const esp_app_desc_t *)(image + desc_offset);
+  const esp_app_desc_t *current_desc = esp_app_get_description();
+  int cmp = compare_version_strings(new_desc->version, current_desc->version);
+  if (cmp < 0) {
+    ESP_LOGE(TAG, "Rejecting firmware rollback from %s to %s",
+             current_desc->version, new_desc->version);
+    return ESP_ERR_INVALID_VERSION;
+  }
+  if (cmp == 0) {
+    ESP_LOGE(TAG, "Rejecting firmware with identical version %s",
+             new_desc->version);
+    return ESP_ERR_INVALID_VERSION;
+  }
+  return ESP_OK;
+}
+
+static esp_err_t ota_validate_header_and_policy(const uint8_t *image,
+                                                size_t len) {
+  size_t desc_offset =
+      sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+  if (len < desc_offset + sizeof(esp_app_desc_t)) {
+    ESP_LOGE(TAG, "Image header block too small (%zu bytes)", len);
     return ESP_ERR_INVALID_SIZE;
   }
 
@@ -34,6 +96,28 @@ static esp_err_t ota_validate_image(const uint8_t *image, size_t len) {
     ESP_LOGE(TAG, "Bad segment count: %u", header->segment_count);
     return ESP_ERR_INVALID_STATE;
   }
+
+#if CONFIG_OTA_SIGNATURE_REQUIRED
+  ESP_LOGE(TAG,
+           "OTA signature enforcement is enabled but no verifier is configured");
+  return ESP_ERR_NOT_SUPPORTED;
+#endif
+
+  return ota_validate_version_policy(image, len);
+}
+
+/**
+ * Validate an in-memory firmware image before writing to flash.
+ * Checks: minimum size, magic byte, segment count, and SHA-256 digest
+ * (when the image indicates a hash is appended).
+ */
+static esp_err_t ota_validate_image(const uint8_t *image, size_t len) {
+  esp_err_t err = ota_validate_header_and_policy(image, len);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  const esp_image_header_t *header = (const esp_image_header_t *)image;
 
   if (header->hash_appended) {
     if (len < 32) {
@@ -142,6 +226,11 @@ static esp_err_t ota_buffered(httpd_req_t *req) {
  * Stream firmware directly to flash (original approach, used as fallback).
  */
 static esp_err_t ota_streaming(httpd_req_t *req) {
+  enum {
+    OTA_HEADER_BLOCK_LEN = sizeof(esp_image_header_t) +
+                           sizeof(esp_image_segment_header_t) +
+                           sizeof(esp_app_desc_t),
+  };
   const esp_partition_t *ota_partition =
       esp_ota_get_next_update_partition(NULL);
   if (!ota_partition) {
@@ -157,6 +246,9 @@ static esp_err_t ota_streaming(httpd_req_t *req) {
   }
 
   char buf[1024];
+  uint8_t header_buf[OTA_HEADER_BLOCK_LEN];
+  size_t header_received = 0;
+  bool policy_validated = false;
   size_t remaining = req->content_len;
   ESP_LOGI(TAG, "Receiving firmware via streaming (%zu bytes)...", remaining);
 
@@ -171,6 +263,21 @@ static esp_err_t ota_streaming(httpd_req_t *req) {
       return ESP_FAIL;
     }
 
+    if (header_received < sizeof(header_buf)) {
+      size_t copy_len = MIN((size_t)recv_len, sizeof(header_buf) - header_received);
+      memcpy(header_buf + header_received, buf, copy_len);
+      header_received += copy_len;
+
+      if (!policy_validated && header_received == sizeof(header_buf)) {
+        err = ota_validate_header_and_policy(header_buf, header_received);
+        if (err != ESP_OK) {
+          esp_ota_abort(ota_handle);
+          return err;
+        }
+        policy_validated = true;
+      }
+    }
+
     if (esp_ota_write(ota_handle, buf, recv_len) != ESP_OK) {
       ESP_LOGE(TAG, "Flash write failed");
       esp_ota_abort(ota_handle);
@@ -178,6 +285,12 @@ static esp_err_t ota_streaming(httpd_req_t *req) {
     }
 
     remaining -= recv_len;
+  }
+
+  if (!policy_validated) {
+    ESP_LOGE(TAG, "Firmware image too small for OTA validation");
+    esp_ota_abort(ota_handle);
+    return ESP_ERR_INVALID_SIZE;
   }
 
   if (esp_ota_end(ota_handle) != ESP_OK) {

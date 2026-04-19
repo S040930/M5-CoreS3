@@ -30,6 +30,7 @@ void ntp_clock_stop(void);
  * @return true if we have valid offset measurements
  */
 bool ntp_clock_is_locked(void);
+bool ntp_clock_has_sane_offset(void);
 
 /**
  * Get current offset from local clock to remote time in nanoseconds.

@@ -110,7 +110,7 @@ static void airplay_adjust_volume(float step_db) {
 void playback_control_play_pause(void) {
   switch (s_source) {
   case PLAYBACK_SOURCE_AIRPLAY: {
-    if (dacp_is_active()) {
+    if (!CONFIG_PRODUCT_AIRPLAY_ONLY && dacp_is_active()) {
       // Tell the source to toggle playback — it will FLUSH the stream
       // on pause and RECORD on resume, so we don't need local muting.
       // Signal the v1 grace period loop (if active) so it sends the
@@ -182,8 +182,10 @@ void playback_control_volume_down(void) {
 void playback_control_next(void) {
   switch (s_source) {
   case PLAYBACK_SOURCE_AIRPLAY:
+#if !CONFIG_PRODUCT_AIRPLAY_ONLY
     dacp_send_next();
     ESP_LOGI(TAG, "AirPlay next track via DACP");
+#endif
     break;
 #ifdef CONFIG_BT_A2DP_ENABLE
   case PLAYBACK_SOURCE_BLUETOOTH:
@@ -198,8 +200,10 @@ void playback_control_next(void) {
 void playback_control_prev(void) {
   switch (s_source) {
   case PLAYBACK_SOURCE_AIRPLAY:
+#if !CONFIG_PRODUCT_AIRPLAY_ONLY
     dacp_send_prev();
     ESP_LOGI(TAG, "AirPlay prev track via DACP");
+#endif
     break;
 #ifdef CONFIG_BT_A2DP_ENABLE
   case PLAYBACK_SOURCE_BLUETOOTH:

@@ -82,7 +82,4 @@ float tas58xx_eq_get_center_freq(int band);
  * Read back biquad coefficients at the expected RAM addresses and log
  * whether they match the default (flat) pattern.  Useful for verifying
  * that the coefficient address table is correct for this device.
- *
- * @return ESP_OK if all addresses look valid
  */
-esp_err_t tas58xx_eq_verify_addresses(void);

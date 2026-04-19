@@ -1,22 +1,32 @@
 #include "web_server.h"
 
+#include "cJSON.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_system.h"
-#include "cJSON.h"
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <sys/stat.h>
+#include "esp_timer.h"
+#include <arpa/inet.h>
 #include <dirent.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 
 #include "settings.h"
+#include "playback_control.h"
+#include "audio/audio_receiver.h"
+#include "led.h"
 #include "wifi.h"
 #include "ethernet.h"
 #include "ota.h"
 #include "log_stream.h"
 #include "rtsp_server.h"
-#include "esp_app_desc.h"
+#include "receiver_state.h"
+#include "status_service.h"
+#include "system_actions.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -29,6 +39,219 @@ static const char *TAG = "web_server";
 static httpd_handle_t s_server = NULL;
 
 #define SPIFFS_CHUNK_SIZE 1024
+#define JSON_BODY_MAX_SIZE 1024
+#define AUTH_TOKEN_BYTES   24
+#define AUTH_TOKEN_HEX_LEN (AUTH_TOKEN_BYTES * 2)
+#define AUTH_TTL_US        (15ULL * 60ULL * 1000000ULL)
+
+typedef struct {
+  char token[AUTH_TOKEN_HEX_LEN + 1];
+  uint64_t expires_at_us;
+  bool active;
+} auth_session_t;
+
+static auth_session_t s_auth_session = {0};
+
+static void bytes_to_hex(const uint8_t *bytes, size_t byte_len, char *out,
+                         size_t out_len) {
+  static const char hex[] = "0123456789abcdef";
+  if (!bytes || !out || out_len < byte_len * 2 + 1) {
+    return;
+  }
+  for (size_t i = 0; i < byte_len; i++) {
+    out[i * 2] = hex[bytes[i] >> 4];
+    out[i * 2 + 1] = hex[bytes[i] & 0x0F];
+  }
+  out[byte_len * 2] = '\0';
+}
+
+static void rotate_auth_token(char token[AUTH_TOKEN_HEX_LEN + 1]) {
+  uint8_t bytes[AUTH_TOKEN_BYTES];
+  esp_fill_random(bytes, sizeof(bytes));
+  bytes_to_hex(bytes, sizeof(bytes), token, AUTH_TOKEN_HEX_LEN + 1);
+}
+
+static bool secure_streq(const char *lhs, const char *rhs) {
+  if (!lhs || !rhs) {
+    return false;
+  }
+  size_t lhs_len = strlen(lhs);
+  size_t rhs_len = strlen(rhs);
+  if (lhs_len != rhs_len) {
+    return false;
+  }
+
+  unsigned char diff = 0;
+  for (size_t i = 0; i < lhs_len; i++) {
+    diff |= (unsigned char)(lhs[i] ^ rhs[i]);
+  }
+  return diff == 0;
+}
+
+static void invalidate_auth_session(void) {
+  memset(&s_auth_session, 0, sizeof(s_auth_session));
+}
+
+static bool auth_session_is_valid(void) {
+  return s_auth_session.active &&
+         (uint64_t)esp_timer_get_time() < s_auth_session.expires_at_us;
+}
+
+static esp_err_t get_peer_ip(httpd_req_t *req, uint32_t *ip_addr) {
+  if (!req || !ip_addr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  int sockfd = httpd_req_to_sockfd(req);
+  struct sockaddr_in peer_addr;
+  socklen_t addr_len = sizeof(peer_addr);
+  if (getpeername(sockfd, (struct sockaddr *)&peer_addr, &addr_len) != 0) {
+    return ESP_FAIL;
+  }
+
+  *ip_addr = peer_addr.sin_addr.s_addr;
+  return ESP_OK;
+}
+
+static bool request_is_ap_setup(httpd_req_t *req) {
+  uint32_t peer_ip = 0;
+  if (!wifi_is_ap_enabled()) {
+    return false;
+  }
+  if (get_peer_ip(req, &peer_ip) != ESP_OK) {
+    return false;
+  }
+  return wifi_is_ap_client_ip(peer_ip);
+}
+
+static bool request_get_token(httpd_req_t *req, char *token, size_t token_len) {
+  if (!req || !token || token_len == 0) {
+    return false;
+  }
+
+  if (httpd_req_get_hdr_value_str(req, "X-Auth-Token", token, token_len) ==
+      ESP_OK) {
+    return token[0] != '\0';
+  }
+
+  char auth_hdr[96] = {0};
+  if (httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr,
+                                  sizeof(auth_hdr)) == ESP_OK) {
+    const char *prefix = "Bearer ";
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(auth_hdr, prefix, prefix_len) == 0) {
+      strncpy(token, auth_hdr + prefix_len, token_len - 1);
+      token[token_len - 1] = '\0';
+      return token[0] != '\0';
+    }
+  }
+
+  char query[128] = {0};
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      httpd_query_key_value(query, "token", token, token_len) == ESP_OK) {
+    return token[0] != '\0';
+  }
+
+  return false;
+}
+
+static bool request_is_authenticated(httpd_req_t *req) {
+#if !CONFIG_WEB_AUTH_REQUIRED
+  (void)req;
+  return true;
+#else
+  if (!auth_session_is_valid()) {
+    invalidate_auth_session();
+    return false;
+  }
+
+  char token[AUTH_TOKEN_HEX_LEN + 1] = {0};
+  if (!request_get_token(req, token, sizeof(token))) {
+    return false;
+  }
+  return secure_streq(token, s_auth_session.token);
+#endif
+}
+
+static esp_err_t reject_auth(httpd_req_t *req) {
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "success", false);
+  cJSON_AddStringToObject(json, "error", "Authentication required");
+  char *json_str = cJSON_PrintUnformatted(json);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_status(req, "401 Unauthorized");
+  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+  free(json_str);
+  cJSON_Delete(json);
+  return ESP_FAIL;
+}
+
+static esp_err_t ensure_access(httpd_req_t *req, bool allow_setup_mode) {
+#if !CONFIG_WEB_AUTH_REQUIRED
+  (void)req;
+  (void)allow_setup_mode;
+  return ESP_OK;
+#else
+  if (allow_setup_mode && request_is_ap_setup(req)) {
+    return ESP_OK;
+  }
+  if (request_is_authenticated(req)) {
+    return ESP_OK;
+  }
+  return reject_auth(req);
+#endif
+}
+
+static esp_err_t send_json_response(httpd_req_t *req, cJSON *json) {
+  char *json_str = cJSON_PrintUnformatted(json);
+  if (!json_str) {
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  httpd_resp_set_type(req, "application/json");
+  esp_err_t err = httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+  free(json_str);
+  return err;
+}
+
+static esp_err_t read_request_body(httpd_req_t *req, char *buf, size_t buf_len,
+                                   size_t max_allowed, size_t *out_len) {
+  if (!req || !buf || buf_len == 0) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (req->content_len <= 0 || (size_t)req->content_len > max_allowed ||
+      (size_t)req->content_len >= buf_len) {
+    return ESP_ERR_INVALID_SIZE;
+  }
+
+  size_t received = 0;
+  while (received < (size_t)req->content_len) {
+    int ret = httpd_req_recv(req, buf + received, req->content_len - received);
+    if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+      continue;
+    }
+    if (ret <= 0) {
+      return ESP_FAIL;
+    }
+    received += (size_t)ret;
+  }
+
+  buf[received] = '\0';
+  if (out_len) {
+    *out_len = received;
+  }
+  return ESP_OK;
+}
+
+static esp_err_t schedule_restart(void) {
+  return system_actions_schedule_restart();
+}
+
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
+static bool log_stream_auth_handler(httpd_req_t *req) {
+  return request_is_authenticated(req);
+}
+#endif
 
 static esp_err_t serve_spiffs_file(httpd_req_t *req, const char *path,
                                    const char *content_type) {
@@ -64,8 +287,366 @@ static esp_err_t favicon_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
 static esp_err_t logs_page_handler(httpd_req_t *req) {
   return serve_spiffs_file(req, "/spiffs/www/logs.html", "text/html");
+}
+
+static esp_err_t core_page_handler(httpd_req_t *req) {
+  return serve_spiffs_file(req, "/spiffs/www/core.html", "text/html");
+}
+
+static const char *playback_source_to_str(playback_source_t src) {
+  switch (src) {
+  case PLAYBACK_SOURCE_AIRPLAY:
+    return "airplay";
+  case PLAYBACK_SOURCE_BLUETOOTH:
+    return "bluetooth";
+  default:
+    return "none";
+  }
+}
+
+static double volume_db_to_percent(float volume_db) {
+  if (volume_db <= -30.0f) {
+    return 0.0;
+  }
+  if (volume_db >= 0.0f) {
+    return 100.0;
+  }
+  return ((double)volume_db + 30.0) / 30.0 * 100.0;
+}
+
+static esp_err_t core_status_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  cJSON *json = cJSON_CreateObject();
+  cJSON *status = cJSON_CreateObject();
+  char device_name[65] = {0};
+  receiver_state_snapshot_t snapshot = {0};
+
+  settings_get_device_name(device_name, sizeof(device_name));
+  receiver_state_get_snapshot(&snapshot);
+
+  cJSON_AddStringToObject(status, "device_name", device_name);
+  cJSON_AddStringToObject(status, "source",
+                          playback_source_to_str(playback_control_get_source()));
+  cJSON_AddBoolToObject(status, "playing", audio_receiver_is_playing());
+  cJSON_AddBoolToObject(status, "wifi_connected", wifi_is_connected());
+  cJSON_AddBoolToObject(status, "eth_connected", ethernet_is_connected());
+  cJSON_AddNumberToObject(status, "free_heap", esp_get_free_heap_size());
+  cJSON_AddBoolToObject(status, "ap_enabled", wifi_is_ap_enabled());
+  cJSON_AddStringToObject(status, "system_state",
+                          receiver_state_to_str(snapshot.state));
+
+  const esp_app_desc_t *app_desc = esp_app_get_description();
+  cJSON_AddStringToObject(status, "firmware_version", app_desc->version);
+
+  cJSON_AddItemToObject(json, "status", status);
+  cJSON_AddBoolToObject(json, "success", true);
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t core_volume_get_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  cJSON *json = cJSON_CreateObject();
+  float volume_db = -15.0f;
+  esp_err_t err = settings_get_volume(&volume_db);
+  if (err != ESP_OK) {
+    volume_db = -15.0f;
+  }
+
+  cJSON_AddBoolToObject(json, "success", true);
+  cJSON_AddNumberToObject(json, "volume_db", volume_db);
+  cJSON_AddNumberToObject(json, "volume_percent", volume_db_to_percent(volume_db));
+
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t core_volume_post_handler(httpd_req_t *req) {
+  char content[128] = {0};
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  if (read_request_body(req, content, sizeof(content), sizeof(content) - 1,
+                        NULL) != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+    return ESP_FAIL;
+  }
+
+  cJSON *json = cJSON_Parse(content);
+  if (!json) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    return ESP_FAIL;
+  }
+
+  cJSON *volume_json = cJSON_GetObjectItem(json, "volume_db");
+  cJSON *response = cJSON_CreateObject();
+
+  if (!volume_json || !cJSON_IsNumber(volume_json)) {
+    cJSON_AddBoolToObject(response, "success", false);
+    cJSON_AddStringToObject(response, "error", "Missing numeric volume_db");
+  } else {
+    float volume_db = (float)volume_json->valuedouble;
+    if (volume_db > 0.0f) {
+      volume_db = 0.0f;
+    }
+    if (volume_db < -30.0f) {
+      volume_db = -30.0f;
+    }
+
+    esp_err_t err = settings_set_volume(volume_db);
+    cJSON_AddBoolToObject(response, "success", err == ESP_OK);
+    if (err == ESP_OK) {
+      cJSON_AddNumberToObject(response, "volume_db", volume_db);
+      cJSON_AddNumberToObject(response, "volume_percent",
+                              volume_db_to_percent(volume_db));
+    } else {
+      cJSON_AddStringToObject(response, "error", esp_err_to_name(err));
+    }
+  }
+
+  send_json_response(req, response);
+  cJSON_Delete(json);
+  cJSON_Delete(response);
+  return ESP_OK;
+}
+
+static esp_err_t core_play_pause_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  (void)req;
+  playback_control_play_pause();
+
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "success", true);
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t core_volume_up_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  (void)req;
+  playback_control_volume_up();
+
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "success", true);
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t core_volume_down_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  (void)req;
+  playback_control_volume_down();
+
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "success", true);
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t core_audio_stats_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  cJSON *json = cJSON_CreateObject();
+  cJSON *stats_json = cJSON_CreateObject();
+  audio_stats_t stats = {0};
+  audio_receiver_get_stats(&stats);
+
+  cJSON_AddNumberToObject(stats_json, "packets_received", stats.packets_received);
+  cJSON_AddNumberToObject(stats_json, "packets_decoded", stats.packets_decoded);
+  cJSON_AddNumberToObject(stats_json, "packets_dropped", stats.packets_dropped);
+  cJSON_AddNumberToObject(stats_json, "decrypt_errors", stats.decrypt_errors);
+  cJSON_AddNumberToObject(stats_json, "buffer_underruns", stats.buffer_underruns);
+  cJSON_AddNumberToObject(stats_json, "buffer_overruns", stats.buffer_overruns);
+  cJSON_AddNumberToObject(stats_json, "late_frames", stats.late_frames);
+  cJSON_AddNumberToObject(stats_json, "last_seq", stats.last_seq);
+  cJSON_AddNumberToObject(stats_json, "output_latency_us",
+                          audio_receiver_get_output_latency_us());
+  cJSON_AddNumberToObject(stats_json, "hardware_latency_us",
+                          audio_receiver_get_hardware_latency_us());
+
+  cJSON_AddBoolToObject(json, "success", true);
+  cJSON_AddItemToObject(json, "stats", stats_json);
+
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t core_led_state_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  cJSON *json = cJSON_CreateObject();
+  led_mode_t status_mode = LED_OFF;
+  led_mode_t rgb_mode = LED_OFF;
+  bool error_active = false;
+  uint8_t brightness = 0;
+
+  led_get_snapshot(&status_mode, &rgb_mode, &error_active, &brightness);
+
+  cJSON_AddBoolToObject(json, "success", true);
+  cJSON_AddNumberToObject(json, "status_mode", status_mode);
+  cJSON_AddNumberToObject(json, "rgb_mode", rgb_mode);
+  cJSON_AddBoolToObject(json, "error", error_active);
+  cJSON_AddNumberToObject(json, "brightness", brightness);
+
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t core_led_post_handler(httpd_req_t *req) {
+  char content[192] = {0};
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  if (read_request_body(req, content, sizeof(content), sizeof(content) - 1,
+                        NULL) != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+    return ESP_FAIL;
+  }
+
+  cJSON *json = cJSON_Parse(content);
+  if (!json) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    return ESP_FAIL;
+  }
+
+  cJSON *brightness_json = cJSON_GetObjectItem(json, "brightness");
+  cJSON *mode_json = cJSON_GetObjectItem(json, "status_mode");
+  cJSON *response = cJSON_CreateObject();
+  esp_err_t err = ESP_OK;
+
+  if (brightness_json && cJSON_IsNumber(brightness_json)) {
+    int brightness = brightness_json->valueint;
+    if (brightness < 0) {
+      brightness = 0;
+    }
+    if (brightness > 255) {
+      brightness = 255;
+    }
+    err = led_set_status_brightness((uint8_t)brightness);
+  }
+
+  if (err == ESP_OK && mode_json && cJSON_IsNumber(mode_json)) {
+    int mode = mode_json->valueint;
+    if (mode < LED_OFF || mode > LED_VU) {
+      err = ESP_ERR_INVALID_ARG;
+    } else {
+      err = led_set_status_mode((led_mode_t)mode);
+    }
+  }
+
+  cJSON_AddBoolToObject(response, "success", err == ESP_OK);
+  if (err != ESP_OK) {
+    cJSON_AddStringToObject(response, "error", esp_err_to_name(err));
+  }
+
+  send_json_response(req, response);
+  cJSON_Delete(json);
+  cJSON_Delete(response);
+  return ESP_OK;
+}
+#endif
+
+static esp_err_t auth_status_handler(httpd_req_t *req) {
+  cJSON *json = cJSON_CreateObject();
+  receiver_state_snapshot_t snapshot = {0};
+  receiver_state_get_snapshot(&snapshot);
+
+  bool authenticated = request_is_authenticated(req);
+  bool ap_setup = request_is_ap_setup(req);
+
+  cJSON_AddBoolToObject(json, "success", true);
+  cJSON_AddBoolToObject(json, "authenticated", authenticated);
+  cJSON_AddBoolToObject(json, "ap_setup", ap_setup);
+  cJSON_AddStringToObject(json, "system_state",
+                          receiver_state_to_str(snapshot.state));
+  cJSON_AddBoolToObject(json, "auth_required", CONFIG_WEB_AUTH_REQUIRED);
+
+#if CONFIG_WEB_AUTH_REQUIRED
+  if (ap_setup && !authenticated) {
+    char secret[33] = {0};
+    if (settings_get_management_secret(secret, sizeof(secret)) == ESP_OK) {
+      cJSON_AddStringToObject(json, "bootstrap_secret", secret);
+    }
+  }
+#endif
+
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t auth_login_handler(httpd_req_t *req) {
+  char content[JSON_BODY_MAX_SIZE + 1] = {0};
+  if (read_request_body(req, content, sizeof(content), JSON_BODY_MAX_SIZE,
+                        NULL) != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+    return ESP_FAIL;
+  }
+
+  cJSON *json = cJSON_Parse(content);
+  if (!json) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    return ESP_FAIL;
+  }
+
+  cJSON *secret_json = cJSON_GetObjectItem(json, "secret");
+  cJSON *response = cJSON_CreateObject();
+  char expected_secret[33] = {0};
+  if (!secret_json || !cJSON_IsString(secret_json) ||
+      settings_get_management_secret(expected_secret, sizeof(expected_secret)) !=
+          ESP_OK ||
+      !secure_streq(cJSON_GetStringValue(secret_json), expected_secret)) {
+    cJSON_AddBoolToObject(response, "success", false);
+    cJSON_AddStringToObject(response, "error", "Invalid management key");
+    httpd_resp_set_status(req, "403 Forbidden");
+  } else {
+    rotate_auth_token(s_auth_session.token);
+    s_auth_session.expires_at_us = (uint64_t)esp_timer_get_time() + AUTH_TTL_US;
+    s_auth_session.active = true;
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "token", s_auth_session.token);
+    cJSON_AddNumberToObject(response, "expires_in_sec",
+                            (double)(AUTH_TTL_US / 1000000ULL));
+  }
+
+  send_json_response(req, response);
+  cJSON_Delete(response);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t auth_logout_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  invalidate_auth_session();
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "success", true);
+  send_json_response(req, json);
+  cJSON_Delete(json);
+  return ESP_OK;
 }
 
 // Captive portal detection handlers
@@ -78,24 +659,10 @@ static esp_err_t captive_portal_redirect(httpd_req_t *req) {
   return ESP_OK;
 }
 
-// Apple devices (iOS/macOS) check these
-static esp_err_t captive_apple_handler(httpd_req_t *req) {
-  // Apple expects specific response, redirect instead
-  return captive_portal_redirect(req);
-}
-
-// Android checks this
-static esp_err_t captive_android_handler(httpd_req_t *req) {
-  // Android expects 204 for no captive portal, anything else triggers portal
-  return captive_portal_redirect(req);
-}
-
-// Windows checks this
-static esp_err_t captive_windows_handler(httpd_req_t *req) {
-  return captive_portal_redirect(req);
-}
-
 static esp_err_t wifi_scan_handler(httpd_req_t *req) {
+  if (ensure_access(req, true) != ESP_OK) {
+    return ESP_FAIL;
+  }
   wifi_ap_record_t *ap_list = NULL;
   uint16_t ap_count = 0;
 
@@ -119,23 +686,22 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(json, "error", esp_err_to_name(err));
   }
 
-  char *json_str = cJSON_Print(json);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, json);
   cJSON_Delete(json);
 
   return ESP_OK;
 }
 
 static esp_err_t wifi_config_handler(httpd_req_t *req) {
-  char content[512];
-  int ret = httpd_req_recv(req, content, sizeof(content) - 1);
-  if (ret <= 0) {
-    httpd_resp_send_500(req);
+  char content[JSON_BODY_MAX_SIZE + 1] = {0};
+  if (ensure_access(req, true) != ESP_OK) {
     return ESP_FAIL;
   }
-  content[ret] = '\0';
+  if (read_request_body(req, content, sizeof(content), JSON_BODY_MAX_SIZE,
+                        NULL) != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+    return ESP_FAIL;
+  }
 
   cJSON *json = cJSON_Parse(content);
   if (!json) {
@@ -156,10 +722,9 @@ static esp_err_t wifi_config_handler(httpd_req_t *req) {
     esp_err_t err = settings_set_wifi_credentials(ssid, password);
     if (err == ESP_OK) {
       cJSON_AddBoolToObject(response, "success", true);
-      ESP_LOGI(TAG, "WiFi credentials saved. We are restarting...");
-      // Schedule restart
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      esp_restart();
+      cJSON_AddStringToObject(response, "message",
+                              "WiFi credentials saved. Restarting");
+      schedule_restart();
     } else {
       cJSON_AddBoolToObject(response, "success", false);
       cJSON_AddStringToObject(response, "error", esp_err_to_name(err));
@@ -169,10 +734,7 @@ static esp_err_t wifi_config_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(response, "error", "Invalid SSID");
   }
 
-  char *json_str = cJSON_Print(response);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, response);
   cJSON_Delete(json);
   cJSON_Delete(response);
 
@@ -180,13 +742,15 @@ static esp_err_t wifi_config_handler(httpd_req_t *req) {
 }
 
 static esp_err_t device_name_handler(httpd_req_t *req) {
-  char content[256];
-  int ret = httpd_req_recv(req, content, sizeof(content) - 1);
-  if (ret <= 0) {
-    httpd_resp_send_500(req);
+  char content[JSON_BODY_MAX_SIZE + 1] = {0};
+  if (ensure_access(req, true) != ESP_OK) {
     return ESP_FAIL;
   }
-  content[ret] = '\0';
+  if (read_request_body(req, content, sizeof(content), JSON_BODY_MAX_SIZE,
+                        NULL) != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+    return ESP_FAIL;
+  }
 
   cJSON *json = cJSON_Parse(content);
   if (!json) {
@@ -211,17 +775,58 @@ static esp_err_t device_name_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(response, "error", "Invalid name");
   }
 
-  char *json_str = cJSON_Print(response);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, response);
   cJSON_Delete(json);
   cJSON_Delete(response);
 
   return ESP_OK;
 }
 
+static esp_err_t wifi_reset_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  esp_err_t err = settings_clear_wifi_credentials();
+  cJSON *response = cJSON_CreateObject();
+
+  if (err == ESP_OK) {
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "message",
+                            "Saved WiFi credentials cleared");
+    send_json_response(req, response);
+    cJSON_Delete(response);
+
+    ESP_LOGW(TAG, "WiFi credentials cleared from web request, rebooting...");
+    schedule_restart();
+    return ESP_OK;
+  }
+
+  cJSON_AddBoolToObject(response, "success", false);
+  cJSON_AddStringToObject(response, "error", esp_err_to_name(err));
+  send_json_response(req, response);
+  cJSON_Delete(response);
+  return ESP_FAIL;
+}
+
+static esp_err_t hap_reset_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  // AirPlay 1 has no HAP pairing data to clear
+  cJSON *response = cJSON_CreateObject();
+  cJSON_AddBoolToObject(response, "success", true);
+  cJSON_AddStringToObject(response, "message",
+                          "No pairing data in AirPlay 1 mode");
+  send_json_response(req, response);
+  cJSON_Delete(response);
+  return ESP_OK;
+}
+
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
 static esp_err_t ota_update_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
   if (req->content_len == 0) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No firmware uploaded");
     return ESP_FAIL;
@@ -229,11 +834,13 @@ static esp_err_t ota_update_handler(httpd_req_t *req) {
 
   // Stop AirPlay to free resources during OTA
   ESP_LOGI(TAG, "Stopping AirPlay for OTA update");
+  receiver_state_set_ota_in_progress(true);
   rtsp_server_stop();
 
   esp_err_t err = ota_start_from_http(req);
 
   if (err != ESP_OK) {
+    receiver_state_set_ota_in_progress(false);
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                         esp_err_to_name(err));
     return ESP_FAIL;
@@ -246,66 +853,87 @@ static esp_err_t ota_update_handler(httpd_req_t *req) {
 
   return ESP_OK;
 }
-
-static esp_err_t system_info_handler(httpd_req_t *req) {
-  cJSON *json = cJSON_CreateObject();
-  cJSON *info = cJSON_CreateObject();
-
-  char ip_str[16] = {0};
-  char mac_str[18] = {0};
-  char device_name[65] = {0};
-  bool wifi_connected = wifi_is_connected();
-  bool eth_connected = ethernet_is_connected();
-
-  // Show IP and MAC for the active interface
-  if (eth_connected) {
-    ethernet_get_ip_str(ip_str, sizeof(ip_str));
-    ethernet_get_mac_str(mac_str, sizeof(mac_str));
-  } else {
-    wifi_get_ip_str(ip_str, sizeof(ip_str));
-    wifi_get_mac_str(mac_str, sizeof(mac_str));
-  }
-  settings_get_device_name(device_name, sizeof(device_name));
-
-  cJSON_AddStringToObject(info, "ip", ip_str);
-  cJSON_AddStringToObject(info, "mac", mac_str);
-  cJSON_AddStringToObject(info, "device_name", device_name);
-  cJSON_AddBoolToObject(info, "wifi_connected", wifi_connected);
-  cJSON_AddBoolToObject(info, "eth_connected", eth_connected);
-  cJSON_AddNumberToObject(info, "free_heap", esp_get_free_heap_size());
-  const esp_app_desc_t *app_desc = esp_app_get_description();
-  cJSON_AddStringToObject(info, "firmware_version", app_desc->version);
-#ifdef CONFIG_DAC_TAS58XX
-  cJSON_AddBoolToObject(info, "eq_supported", true);
-#else
-  cJSON_AddBoolToObject(info, "eq_supported", false);
 #endif
 
-  cJSON_AddItemToObject(json, "info", info);
+static esp_err_t status_handler(httpd_req_t *req) {
+  if (ensure_access(req, true) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  cJSON *json = cJSON_CreateObject();
+  cJSON *status = cJSON_CreateObject();
+  cJSON *pipeline = cJSON_CreateObject();
+  status_service_snapshot_t snapshot = {0};
+
+  status_service_get_snapshot(&snapshot);
+
+  cJSON_AddStringToObject(status, "ip", snapshot.ip);
+  cJSON_AddStringToObject(status, "mac", snapshot.mac);
+  cJSON_AddStringToObject(status, "device_name", snapshot.device_name);
+  cJSON_AddStringToObject(status, "firmware_version",
+                          snapshot.firmware_version);
+  cJSON_AddStringToObject(status, "receiver_state", snapshot.receiver_state);
+  cJSON_AddStringToObject(status, "playback_source", snapshot.playback_source);
+  cJSON_AddStringToObject(status, "track_title", snapshot.track_title);
+  cJSON_AddStringToObject(status, "track_artist", snapshot.track_artist);
+  cJSON_AddBoolToObject(status, "wifi_connected", snapshot.wifi_connected);
+  cJSON_AddBoolToObject(status, "eth_connected", snapshot.eth_connected);
+  cJSON_AddBoolToObject(status, "ap_enabled", snapshot.ap_enabled);
+  cJSON_AddBoolToObject(status, "playing", snapshot.playing);
+  cJSON_AddNumberToObject(status, "free_heap", snapshot.free_heap);
+  cJSON_AddNumberToObject(status, "min_free_heap", snapshot.min_free_heap);
+  cJSON_AddNumberToObject(status, "reconnect_count", snapshot.reconnect_count);
+
+  cJSON_AddStringToObject(pipeline, "codec", snapshot.pipeline.codec);
+  cJSON_AddNumberToObject(pipeline, "buffer_depth_frames",
+                          snapshot.pipeline.buffer_depth_frames);
+  cJSON_AddNumberToObject(pipeline, "output_latency_us",
+                          snapshot.pipeline.output_latency_us);
+  cJSON_AddNumberToObject(pipeline, "hardware_latency_us",
+                          snapshot.pipeline.hardware_latency_us);
+  cJSON_AddNumberToObject(pipeline, "target_latency_ms",
+                          snapshot.pipeline.target_latency_ms);
+  cJSON_AddNumberToObject(pipeline, "stream_port", snapshot.pipeline.stream_port);
+  cJSON_AddNumberToObject(pipeline, "buffered_port",
+                          snapshot.pipeline.buffered_port);
+  cJSON_AddNumberToObject(pipeline, "avg_task_load_pct",
+                          snapshot.pipeline.avg_task_load_pct);
+  cJSON_AddNumberToObject(pipeline, "peak_task_load_pct",
+                          snapshot.pipeline.peak_task_load_pct);
+  cJSON_AddNumberToObject(pipeline, "packets_received",
+                          snapshot.pipeline.stats.packets_received);
+  cJSON_AddNumberToObject(pipeline, "packets_decoded",
+                          snapshot.pipeline.stats.packets_decoded);
+  cJSON_AddNumberToObject(pipeline, "packets_dropped",
+                          snapshot.pipeline.stats.packets_dropped);
+  cJSON_AddNumberToObject(pipeline, "decrypt_errors",
+                          snapshot.pipeline.stats.decrypt_errors);
+  cJSON_AddNumberToObject(pipeline, "buffer_underruns",
+                          snapshot.pipeline.stats.buffer_underruns);
+  cJSON_AddNumberToObject(pipeline, "buffer_overruns",
+                          snapshot.pipeline.stats.buffer_overruns);
+
+  cJSON_AddItemToObject(json, "status", status);
+  cJSON_AddItemToObject(json, "pipeline", pipeline);
   cJSON_AddBoolToObject(json, "success", true);
 
-  char *json_str = cJSON_Print(json);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, json);
   cJSON_Delete(json);
 
   return ESP_OK;
 }
 
 static esp_err_t system_restart_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
   cJSON *json = cJSON_CreateObject();
   cJSON_AddBoolToObject(json, "success", true);
 
-  char *json_str = cJSON_Print(json);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, json);
   cJSON_Delete(json);
 
   ESP_LOGI(TAG, "Restart requested via web interface");
-  vTaskDelay(pdMS_TO_TICKS(500));
-  esp_restart();
+  schedule_restart();
 
   return ESP_OK;
 }
@@ -314,8 +942,24 @@ static esp_err_t system_restart_handler(httpd_req_t *req) {
 /*  SPIFFS File Management API                                         */
 /* ================================================================== */
 
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
 // Allowed path prefixes for file upload (prevent writes outside SPIFFS)
-static const char *ALLOWED_PREFIXES[] = {"/spiffs/"};
+static const char *ALLOWED_PREFIXES[] = {"/spiffs/uploads/"};
+
+static bool has_allowed_extension(const char *path) {
+  static const char *extensions[] = {".txt", ".json", ".cfg",
+                                     ".bin", ".html", ".css", ".js"};
+  const char *dot = strrchr(path, '.');
+  if (!dot) {
+    return false;
+  }
+  for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++) {
+    if (strcmp(dot, extensions[i]) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static bool is_path_allowed(const char *path) {
   for (int i = 0; i < sizeof(ALLOWED_PREFIXES) / sizeof(ALLOWED_PREFIXES[0]);
@@ -325,13 +969,16 @@ static bool is_path_allowed(const char *path) {
       if (strstr(path, "..") != NULL) {
         return false;
       }
-      return true;
+      return has_allowed_extension(path);
     }
   }
   return false;
 }
 
 static esp_err_t fs_upload_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
   // Get target path from query string
   char query[128] = {0};
   char path[64] = {0};
@@ -353,6 +1000,7 @@ static esp_err_t fs_upload_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  mkdir("/spiffs/uploads", 0777);
   FILE *f = fopen(path, "wb");
   if (!f) {
     ESP_LOGE(TAG, "Failed to create %s", path);
@@ -366,6 +1014,9 @@ static esp_err_t fs_upload_handler(httpd_req_t *req) {
   while (remaining > 0) {
     int to_read = remaining < (int)sizeof(buf) ? remaining : (int)sizeof(buf);
     int received = httpd_req_recv(req, buf, to_read);
+    if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+      continue;
+    }
     if (received <= 0) {
       fclose(f);
       remove(path);
@@ -373,7 +1024,13 @@ static esp_err_t fs_upload_handler(httpd_req_t *req) {
                           "Receive failed");
       return ESP_FAIL;
     }
-    fwrite(buf, 1, received, f);
+    if (fwrite(buf, 1, received, f) != (size_t)received) {
+      fclose(f);
+      remove(path);
+      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                          "Write failed");
+      return ESP_FAIL;
+    }
     remaining -= received;
   }
   fclose(f);
@@ -384,15 +1041,15 @@ static esp_err_t fs_upload_handler(httpd_req_t *req) {
   cJSON_AddBoolToObject(json, "success", true);
   cJSON_AddNumberToObject(json, "size", req->content_len);
   cJSON_AddStringToObject(json, "path", path);
-  char *json_str = cJSON_Print(json);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, json);
   cJSON_Delete(json);
   return ESP_OK;
 }
 
 static esp_err_t fs_delete_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
   char query[128] = {0};
   char path[64] = {0};
 
@@ -416,23 +1073,23 @@ static esp_err_t fs_delete_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(json, "success", false);
     cJSON_AddStringToObject(json, "error", "File not found");
   }
-  char *json_str = cJSON_Print(json);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, json);
   cJSON_Delete(json);
   return ESP_OK;
 }
 
 static esp_err_t fs_list_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
   char query[128] = {0};
-  char dir_path[64] = "/spiffs";
+  char dir_path[64] = "/spiffs/uploads";
 
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
     httpd_query_key_value(query, "dir", dir_path, sizeof(dir_path));
   }
 
-  if (!is_path_allowed(dir_path) && strcmp(dir_path, "/spiffs") != 0) {
+  if (strcmp(dir_path, "/spiffs/uploads") != 0) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Path not allowed");
     return ESP_FAIL;
   }
@@ -463,18 +1120,17 @@ static esp_err_t fs_list_handler(httpd_req_t *req) {
   }
 
   cJSON_AddItemToObject(json, "files", files);
-  char *json_str = cJSON_Print(json);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, json);
   cJSON_Delete(json);
   return ESP_OK;
 }
+#endif
 
 /* ================================================================== */
 /*  EQ Page + API  (only when TAS58xx DAC is configured)               */
 /* ================================================================== */
 
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
 #ifdef CONFIG_DAC_TAS58XX
 
 static esp_err_t eq_page_handler(httpd_req_t *req) {
@@ -482,6 +1138,9 @@ static esp_err_t eq_page_handler(httpd_req_t *req) {
 }
 
 static esp_err_t eq_get_handler(httpd_req_t *req) {
+  if (ensure_access(req, false) != ESP_OK) {
+    return ESP_FAIL;
+  }
   cJSON *json = cJSON_CreateObject();
   cJSON *arr = cJSON_CreateArray();
 
@@ -501,22 +1160,21 @@ static esp_err_t eq_get_handler(httpd_req_t *req) {
   cJSON_AddNumberToObject(json, "bands", SETTINGS_EQ_BANDS);
   cJSON_AddBoolToObject(json, "success", true);
 
-  char *json_str = cJSON_Print(json);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, json);
   cJSON_Delete(json);
   return ESP_OK;
 }
 
 static esp_err_t eq_post_handler(httpd_req_t *req) {
   char content[512];
-  int ret = httpd_req_recv(req, content, sizeof(content) - 1);
-  if (ret <= 0) {
-    httpd_resp_send_500(req);
+  if (ensure_access(req, false) != ESP_OK) {
     return ESP_FAIL;
   }
-  content[ret] = '\0';
+  if (read_request_body(req, content, sizeof(content), sizeof(content) - 1,
+                        NULL) != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+    return ESP_FAIL;
+  }
 
   cJSON *json = cJSON_Parse(content);
   if (!json) {
@@ -555,16 +1213,14 @@ static esp_err_t eq_post_handler(httpd_req_t *req) {
                             "Expected 'gains' array with 15 values");
   }
 
-  char *json_str = cJSON_Print(response);
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-  free(json_str);
+  send_json_response(req, response);
   cJSON_Delete(json);
   cJSON_Delete(response);
   return ESP_OK;
 }
 
 #endif /* CONFIG_DAC_TAS58XX */
+#endif /* CONFIG_ENABLE_DEV_DIAGNOSTICS */
 
 esp_err_t web_server_start(uint16_t port) {
   if (s_server) {
@@ -574,6 +1230,7 @@ esp_err_t web_server_start(uint16_t port) {
 
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = port;
+  config.uri_match_fn = httpd_uri_match_wildcard;
 #ifdef CONFIG_BT_ENABLED
   config.max_open_sockets = 2;   // BT: tighter socket budget (LWIP 12)
   config.send_wait_timeout = 10; // BT/WiFi coexistence slows TCP drain
@@ -581,7 +1238,7 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_open_sockets = 3; // Limit to save lwIP socket slots for AirPlay
 #endif
   config.lru_purge_enable = true; // Reclaim stale sockets when all are in use
-  config.max_uri_handlers = 20;   // Room for captive portal + EQ handlers
+  config.max_uri_handlers = 32;   // Room for captive portal, APIs, logs, EQ
   config.max_resp_headers = 8;
   config.stack_size = 8192;
 
@@ -600,9 +1257,20 @@ esp_err_t web_server_start(uint16_t port) {
       .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_handler};
   httpd_register_uri_handler(s_server, &favicon_uri);
 
-  httpd_uri_t logs_uri = {
-      .uri = "/logs", .method = HTTP_GET, .handler = logs_page_handler};
-  httpd_register_uri_handler(s_server, &logs_uri);
+  httpd_uri_t auth_status_uri = {.uri = "/api/auth/status",
+                                 .method = HTTP_GET,
+                                 .handler = auth_status_handler};
+  httpd_register_uri_handler(s_server, &auth_status_uri);
+
+  httpd_uri_t auth_login_uri = {.uri = "/api/auth/login",
+                                .method = HTTP_POST,
+                                .handler = auth_login_handler};
+  httpd_register_uri_handler(s_server, &auth_login_uri);
+
+  httpd_uri_t auth_logout_uri = {.uri = "/api/auth/logout",
+                                 .method = HTTP_POST,
+                                 .handler = auth_logout_handler};
+  httpd_register_uri_handler(s_server, &auth_logout_uri);
 
   httpd_uri_t wifi_scan_uri = {.uri = "/api/wifi/scan",
                                .method = HTTP_GET,
@@ -619,22 +1287,110 @@ esp_err_t web_server_start(uint16_t port) {
                                  .handler = device_name_handler};
   httpd_register_uri_handler(s_server, &device_name_uri);
 
-  httpd_uri_t ota_uri = {.uri = "/api/ota/update",
-                         .method = HTTP_POST,
-                         .handler = ota_update_handler};
-  httpd_register_uri_handler(s_server, &ota_uri);
+  httpd_uri_t wifi_reset_uri = {.uri = "/api/wifi/reset",
+                                .method = HTTP_POST,
+                                .handler = wifi_reset_handler};
+  httpd_register_uri_handler(s_server, &wifi_reset_uri);
 
-  httpd_uri_t system_info_uri = {.uri = "/api/system/info",
-                                 .method = HTTP_GET,
-                                 .handler = system_info_handler};
-  httpd_register_uri_handler(s_server, &system_info_uri);
+  httpd_uri_t hap_reset_uri = {.uri = "/api/airplay/reset-pairing",
+                               .method = HTTP_POST,
+                               .handler = hap_reset_handler};
+  httpd_register_uri_handler(s_server, &hap_reset_uri);
+
+  httpd_uri_t status_uri = {.uri = "/api/status",
+                            .method = HTTP_GET,
+                            .handler = status_handler};
+  httpd_register_uri_handler(s_server, &status_uri);
+
+  httpd_uri_t legacy_status_uri = {.uri = "/api/system/info",
+                                   .method = HTTP_GET,
+                                   .handler = status_handler};
+  httpd_register_uri_handler(s_server, &legacy_status_uri);
 
   httpd_uri_t system_restart_uri = {.uri = "/api/system/restart",
                                     .method = HTTP_POST,
                                     .handler = system_restart_handler};
   httpd_register_uri_handler(s_server, &system_restart_uri);
 
-  // File management API
+  // Captive portal detection endpoints
+  static const char *captive_uris[] = {
+      "/hotspot-detect.html", "/library/test/success.html",
+      "/generate_204",        "/connecttest.txt",
+      "/ncsi.txt",            "/gen_204",
+      "/success.txt",         "/canonical.html",
+      "/fwlink/*",
+  };
+  for (size_t i = 0; i < sizeof(captive_uris) / sizeof(captive_uris[0]); i++) {
+    httpd_uri_t captive = {.uri = captive_uris[i],
+                           .method = HTTP_GET,
+                           .handler = captive_portal_redirect};
+    httpd_register_uri_handler(s_server, &captive);
+  }
+
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
+  httpd_uri_t logs_uri = {
+      .uri = "/logs", .method = HTTP_GET, .handler = logs_page_handler};
+  httpd_register_uri_handler(s_server, &logs_uri);
+
+  httpd_uri_t core_uri = {
+      .uri = "/core", .method = HTTP_GET, .handler = core_page_handler};
+  httpd_register_uri_handler(s_server, &core_uri);
+
+  httpd_uri_t core_status_uri = {.uri = "/api/core/status",
+                                 .method = HTTP_GET,
+                                 .handler = core_status_handler};
+  httpd_register_uri_handler(s_server, &core_status_uri);
+
+  httpd_uri_t core_volume_get_uri = {.uri = "/api/core/volume",
+                                     .method = HTTP_GET,
+                                     .handler = core_volume_get_handler};
+  httpd_register_uri_handler(s_server, &core_volume_get_uri);
+
+  httpd_uri_t core_volume_post_uri = {.uri = "/api/core/volume",
+                                      .method = HTTP_POST,
+                                      .handler = core_volume_post_handler};
+  httpd_register_uri_handler(s_server, &core_volume_post_uri);
+
+  httpd_uri_t core_play_pause_uri = {.uri = "/api/core/play-pause",
+                                     .method = HTTP_POST,
+                                     .handler = core_play_pause_handler};
+  httpd_register_uri_handler(s_server, &core_play_pause_uri);
+
+  httpd_uri_t core_volume_up_uri = {.uri = "/api/core/volume/up",
+                                    .method = HTTP_POST,
+                                    .handler = core_volume_up_handler};
+  httpd_register_uri_handler(s_server, &core_volume_up_uri);
+
+  httpd_uri_t core_volume_down_uri = {.uri = "/api/core/volume/down",
+                                      .method = HTTP_POST,
+                                      .handler = core_volume_down_handler};
+  httpd_register_uri_handler(s_server, &core_volume_down_uri);
+
+  httpd_uri_t core_audio_stats_uri = {.uri = "/api/core/audio/stats",
+                                      .method = HTTP_GET,
+                                      .handler = core_audio_stats_handler};
+  httpd_register_uri_handler(s_server, &core_audio_stats_uri);
+
+  httpd_uri_t core_led_state_uri = {.uri = "/api/core/led/state",
+                                    .method = HTTP_GET,
+                                    .handler = core_led_state_handler};
+  httpd_register_uri_handler(s_server, &core_led_state_uri);
+
+  httpd_uri_t core_led_post_uri = {.uri = "/api/core/led",
+                                   .method = HTTP_POST,
+                                   .handler = core_led_post_handler};
+  httpd_register_uri_handler(s_server, &core_led_post_uri);
+
+  httpd_uri_t legacy_hap_reset_uri = {.uri = "/api/hap/reset",
+                                      .method = HTTP_POST,
+                                      .handler = hap_reset_handler};
+  httpd_register_uri_handler(s_server, &legacy_hap_reset_uri);
+
+  httpd_uri_t ota_uri = {.uri = "/api/ota/update",
+                         .method = HTTP_POST,
+                         .handler = ota_update_handler};
+  httpd_register_uri_handler(s_server, &ota_uri);
+
   httpd_uri_t fs_upload_uri = {.uri = "/api/fs/upload",
                                .method = HTTP_POST,
                                .handler = fs_upload_handler};
@@ -649,30 +1405,6 @@ esp_err_t web_server_start(uint16_t port) {
       .uri = "/api/fs/list", .method = HTTP_GET, .handler = fs_list_handler};
   httpd_register_uri_handler(s_server, &fs_list_uri);
 
-  // Captive portal detection endpoints
-  // Apple iOS/macOS
-  httpd_uri_t apple_captive1 = {.uri = "/hotspot-detect.html",
-                                .method = HTTP_GET,
-                                .handler = captive_apple_handler};
-  httpd_register_uri_handler(s_server, &apple_captive1);
-
-  httpd_uri_t apple_captive2 = {.uri = "/library/test/success.html",
-                                .method = HTTP_GET,
-                                .handler = captive_apple_handler};
-  httpd_register_uri_handler(s_server, &apple_captive2);
-
-  // Android
-  httpd_uri_t android_captive = {.uri = "/generate_204",
-                                 .method = HTTP_GET,
-                                 .handler = captive_android_handler};
-  httpd_register_uri_handler(s_server, &android_captive);
-
-  // Windows
-  httpd_uri_t windows_captive = {.uri = "/connecttest.txt",
-                                 .method = HTTP_GET,
-                                 .handler = captive_windows_handler};
-  httpd_register_uri_handler(s_server, &windows_captive);
-
 #ifdef CONFIG_DAC_TAS58XX
   httpd_uri_t eq_page_uri = {
       .uri = "/eq", .method = HTTP_GET, .handler = eq_page_handler};
@@ -686,11 +1418,20 @@ esp_err_t web_server_start(uint16_t port) {
       .uri = "/api/eq", .method = HTTP_POST, .handler = eq_post_handler};
   httpd_register_uri_handler(s_server, &eq_post_uri);
 #endif
+#endif
 
+  httpd_uri_t catch_all = {.uri = "/*",
+                           .method = HTTP_GET,
+                           .handler = captive_portal_redirect};
+  httpd_register_uri_handler(s_server, &catch_all);
+
+  // Registration of /ws/logs is now handled safely within log_stream_register
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
+  log_stream_set_auth_callback(log_stream_auth_handler);
   log_stream_register(s_server);
+#endif
 
-  ESP_LOGI(TAG, "Web server started on port %d with captive portal support",
-           port);
+  ESP_LOGI(TAG, "Web server started on port %d", port);
   return ESP_OK;
 }
 

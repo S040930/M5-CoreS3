@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include <stdbool.h>
 
 /**
  * WebSocket-based log streaming.
@@ -19,8 +20,15 @@
  */
 esp_err_t log_stream_init(void);
 
+typedef bool (*log_stream_auth_cb_t)(httpd_req_t *req);
+
 /**
  * Register the /ws/logs WebSocket handler on the given HTTP server
  * and start the broadcast task.
  */
 esp_err_t log_stream_register(httpd_handle_t server);
+
+/**
+ * Install an optional authentication callback for the WebSocket handshake.
+ */
+void log_stream_set_auth_callback(log_stream_auth_cb_t callback);

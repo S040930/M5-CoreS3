@@ -6,7 +6,7 @@
 #include <sys/socket.h>
 
 #include "esp_log.h"
-#include "rtsp_crypto.h"
+#include "socket_utils.h"
 
 static const char *TAG = "rtsp_message";
 
@@ -123,17 +123,29 @@ int rtsp_request_parse(const uint8_t *data, size_t len, rtsp_request_t *req) {
   return 0;
 }
 
-// Internal: send all data, handling partial sends
-static int send_all(int socket, const uint8_t *data, size_t len) {
-  size_t sent = 0;
-  while (sent < len) {
-    ssize_t r = send(socket, data + sent, len - sent, 0);
-    if (r <= 0) {
-      return -1;
-    }
-    sent += (size_t)r;
+// Internal: build and send response
+static int build_and_send_response(int socket, rtsp_conn_t *conn,
+                                   const char *header, int header_len,
+                                   const uint8_t *body, size_t body_len) {
+  size_t total_len = (size_t)header_len + body_len;
+  uint8_t *response = malloc(total_len);
+  if (!response) {
+    ESP_LOGE(TAG, "Failed to allocate response buffer");
+    return -1;
   }
-  return 0;
+
+  memcpy(response, header, (size_t)header_len);
+  if (body && body_len > 0) {
+    memcpy(response + header_len, body, body_len);
+  }
+
+  int result = (socket_utils_send_all(socket, response, total_len) < 0) ? -1 : 0;
+  if (result < 0) {
+    ESP_LOGE(TAG, "Failed to send response");
+  }
+
+  free(response);
+  return result;
 }
 
 int rtsp_send_response(int socket, rtsp_conn_t *conn, int status_code,
@@ -178,32 +190,8 @@ int rtsp_send_response(int socket, rtsp_conn_t *conn, int status_code,
                           status_code, status_text, cseq);
   }
 
-  // Build complete response
-  size_t total_len = (size_t)header_len + body_len;
-  uint8_t *response = malloc(total_len);
-  if (!response) {
-    ESP_LOGE(TAG, "Failed to allocate response buffer");
-    return -1;
-  }
-
-  memcpy(response, header, (size_t)header_len);
-  if (body && body_len > 0) {
-    memcpy(response + header_len, body, body_len);
-  }
-
-  // Send encrypted or plain depending on mode
-  int result;
-  if (conn && conn->encrypted_mode) {
-    result = rtsp_crypto_write_frame(socket, conn, response, total_len);
-  } else {
-    result = (send_all(socket, response, total_len) < 0) ? -1 : 0;
-    if (result < 0) {
-      ESP_LOGE(TAG, "Failed to send RTSP response");
-    }
-  }
-
-  free(response);
-  return result;
+  return build_and_send_response(socket, conn, header, header_len,
+                                 (const uint8_t *)body, body_len);
 }
 
 int rtsp_send_ok(int socket, rtsp_conn_t *conn, int cseq) {
@@ -223,30 +211,6 @@ int rtsp_send_http_response(int socket, rtsp_conn_t *conn, int status_code,
                             "\r\n",
                             status_code, status_text, content_type, body_len);
 
-  // Build complete response
-  size_t total_len = (size_t)header_len + body_len;
-  uint8_t *response = malloc(total_len);
-  if (!response) {
-    ESP_LOGE(TAG, "Failed to allocate response buffer");
-    return -1;
-  }
-
-  memcpy(response, header, (size_t)header_len);
-  if (body && body_len > 0) {
-    memcpy(response + header_len, body, body_len);
-  }
-
-  // Send encrypted or plain depending on mode
-  int result;
-  if (conn && conn->encrypted_mode) {
-    result = rtsp_crypto_write_frame(socket, conn, response, total_len);
-  } else {
-    result = (send_all(socket, response, total_len) < 0) ? -1 : 0;
-    if (result < 0) {
-      ESP_LOGE(TAG, "Failed to send HTTP response");
-    }
-  }
-
-  free(response);
-  return result;
+  return build_and_send_response(socket, conn, header, header_len,
+                                 (const uint8_t *)body, body_len);
 }

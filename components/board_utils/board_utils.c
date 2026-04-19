@@ -56,6 +56,17 @@ esp_err_t board_i2c_write(i2c_master_dev_handle_t dev, uint8_t reg,
     return ESP_ERR_INVALID_STATE;
   }
 
+  if (len + 1 <= 32) {
+    uint8_t buf[32];
+    buf[0] = reg;
+    memcpy(buf + 1, data, len);
+    esp_err_t ret = i2c_master_transmit(dev, buf, len + 1, BOARD_I2C_TIMEOUT_MS);
+    if (ret != ESP_OK) {
+      ESP_LOGD(TAG, "I2C write reg 0x%02X failed: %s", reg, esp_err_to_name(ret));
+    }
+    return ret;
+  }
+
   uint8_t *buf = malloc(len + 1);
   if (buf == NULL) {
     return ESP_ERR_NO_MEM;

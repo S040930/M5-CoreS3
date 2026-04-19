@@ -2,7 +2,27 @@
 
 #include "esp_err.h"
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "freertos/FreeRTOS.h"
+
+typedef struct {
+  bool speaker_open;
+  uint32_t output_rate;
+  uint8_t bits_per_sample;
+  uint8_t channels;
+  uint16_t channel_mask;
+  int mclk_multiple;
+  bool muted;
+  int volume;
+  int reg04;
+  int reg05;
+  int reg06;
+  int reg0c;
+  int reg12;
+  int reg14;
+} audio_output_diag_t;
 
 /**
  * Initialize I2S audio output
@@ -48,3 +68,20 @@ void audio_output_set_sample_rate(uint32_t rate);
  * The resampler is re-initialized if the rate changes.
  */
 void audio_output_set_source_rate(int rate);
+
+/**
+ * Check whether the AirPlay output worker is active.
+ * Used by RTSP handlers to avoid flush requests when output is stopped.
+ */
+bool audio_output_is_active(void);
+
+/**
+ * Get CoreS3 speaker diagnostic state and key AW88298 registers.
+ */
+esp_err_t audio_output_get_diag(audio_output_diag_t *diag);
+
+/**
+ * Play a short local test tone through the speaker path.
+ */
+esp_err_t audio_output_play_test_tone(uint32_t frequency_hz, uint32_t duration_ms,
+                                      uint8_t amplitude_pct);

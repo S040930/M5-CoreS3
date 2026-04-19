@@ -38,6 +38,7 @@ static httpd_handle_t s_server;
 static int s_clients[MAX_WS_CLIENTS];
 static int s_client_count;
 static SemaphoreHandle_t s_client_mutex;
+static log_stream_auth_cb_t s_auth_cb;
 
 static vprintf_like_t s_orig_vprintf;
 
@@ -107,6 +108,10 @@ static int log_vprintf_hook(const char *fmt, va_list args) {
 
 static esp_err_t ws_log_handler(httpd_req_t *req) {
   if (req->method == HTTP_GET) {
+    if (s_auth_cb && !s_auth_cb(req)) {
+      httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Authentication required");
+      return ESP_FAIL;
+    }
     /* Handshake — register this socket. */
     int fd = httpd_req_to_sockfd(req);
     if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -219,7 +224,15 @@ esp_err_t log_stream_init(void) {
   return ESP_OK;
 }
 
+static bool s_ws_registered = false;
+
 esp_err_t log_stream_register(httpd_handle_t server) {
+  if (s_ws_registered && s_server == server) {
+    return ESP_OK;
+  }
+  if (s_ws_registered && s_server != server) {
+    s_ws_registered = false;
+  }
   s_server = server;
 
   httpd_uri_t ws_uri = {
@@ -229,14 +242,24 @@ esp_err_t log_stream_register(httpd_handle_t server) {
       .is_websocket = true,
   };
   esp_err_t err = httpd_register_uri_handler(server, &ws_uri);
+  if (err == ESP_ERR_HTTPD_HANDLER_EXISTS) {
+    s_ws_registered = true;
+    ESP_LOGW("log_stream", "/ws/logs already registered, reusing existing handler");
+    return ESP_OK;
+  }
   if (err != ESP_OK) {
     ESP_LOGE("log_stream", "Failed to register /ws/logs: %s",
              esp_err_to_name(err));
     return err;
   }
 
+  s_ws_registered = true;
   task_create_spiram(broadcast_task, "log_ws", BROADCAST_TASK_STACK, NULL, 3,
                      NULL, NULL);
   ESP_LOGI("log_stream", "Log streaming on /ws/logs");
   return ESP_OK;
+}
+
+void log_stream_set_auth_callback(log_stream_auth_cb_t callback) {
+  s_auth_cb = callback;
 }

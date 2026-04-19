@@ -1218,19 +1218,6 @@ static unsigned long gcd(unsigned long a, unsigned long b) {
 // rewrite them using SIMD. Note that changing the "sum" variable from a float
 // to a double improves the quality somewhat at the possible expense of speed.
 
-#if 0 // Version 1 (canonical, very simple but slow and less accurate, not
-      // recommended)
-static double apply_filter (artsample_t *A, artsample_t *B, int num_taps)
-{
-    artsample_t sum = 0.0;
-
-    do sum += *A++ * *B++;
-    while (--num_taps);
-
-    return sum;
-}
-#endif
-
 #if defined(__XTENSA__) && !defined(PATH_WIDTH)
 // ESP32/Xtensa: pure float to use hardware FPU (MADD.S), avoid software double
 // emulation

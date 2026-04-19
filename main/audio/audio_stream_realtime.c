@@ -340,6 +340,10 @@ static void control_receiver_task(void *pvParameters) {
         uint64_t ntp_frac = nctoh32(packet + 12);
         uint64_t network_time_ns =
             (ntp_secs * 1000000000ULL) + ((ntp_frac * 1000000000ULL) >> 32);
+        ESP_LOGI(TAG,
+                 "AirPlay v1 sync packet: type=0x%02X rtp=%" PRIu32
+                 " ntp_secs=%" PRIu64,
+                 packet_type, rtp_timestamp, ntp_secs);
         audio_receiver_set_anchor_time(0, network_time_ns, rtp_timestamp);
       }
       break;
@@ -403,8 +407,11 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
     return ESP_FAIL;
   }
   state->data_port = bound_port;
+  ESP_LOGI(TAG, "Realtime data socket bound: requested=%u actual=%u", port,
+           state->data_port);
 
   if (state->control_port > 0) {
+    uint16_t ctrl_requested = state->control_port;
     uint16_t ctrl_bound = state->control_port;
     state->control_socket =
         socket_utils_bind_udp(state->control_port, 1, 0, &ctrl_bound);
@@ -414,6 +421,8 @@ static esp_err_t realtime_start(audio_stream_t *stream, uint16_t port) {
       return ESP_FAIL;
     }
     state->control_port = ctrl_bound;
+    ESP_LOGI(TAG, "Realtime control socket bound: requested=%u actual=%u",
+             ctrl_requested, state->control_port);
   }
 
   stream->running = true;

@@ -1,5 +1,6 @@
 #include "rtsp_rsa.h"
 
+#include <ctype.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -47,6 +48,35 @@ static mbedtls_entropy_context s_entropy;
 static mbedtls_ctr_drbg_context s_ctr_drbg;
 static bool s_pk_initialized = false;
 
+static int normalize_airplay_b64(const char *input, char *output,
+                                 size_t output_size, size_t *output_len) {
+  if (!input || !output || output_size == 0 || !output_len) {
+    return -1;
+  }
+
+  size_t n = 0;
+  for (const char *p = input; *p; p++) {
+    unsigned char ch = (unsigned char)*p;
+    if (isspace(ch)) {
+      continue;
+    }
+
+    if (ch == '-') {
+      ch = '+';
+    } else if (ch == '_') {
+      ch = '/';
+    }
+
+    if (n >= output_size - 1) {
+      return -1;
+    }
+    output[n++] = (char)ch;
+  }
+  output[n] = '\0';
+  *output_len = n;
+  return 0;
+}
+
 static int ensure_pk_initialized(void) {
   if (s_pk_initialized) {
     return 0;
@@ -84,16 +114,29 @@ static int ensure_pk_initialized(void) {
 // Simple base64 decode using libsodium
 static int b64_decode(const char *b64, uint8_t *out, size_t out_size,
                       size_t *out_len) {
-  // Apple base64 may lack padding — libsodium handles that with _IGNORE variant
-  if (sodium_base642bin(out, out_size, b64, strlen(b64), "\r\n \t", out_len,
-                        NULL, sodium_base64_VARIANT_ORIGINAL_NO_PADDING) != 0) {
-    // Try with padding variant
-    if (sodium_base642bin(out, out_size, b64, strlen(b64), "\r\n \t", out_len,
-                          NULL, sodium_base64_VARIANT_ORIGINAL) != 0) {
-      return -1;
-    }
+  char normalized[1024];
+  size_t normalized_len = 0;
+  if (normalize_airplay_b64(b64, normalized, sizeof(normalized),
+                            &normalized_len) != 0) {
+    return -1;
   }
-  return 0;
+
+  if (sodium_base642bin(out, out_size, normalized, normalized_len, NULL,
+                        out_len, NULL,
+                        sodium_base64_VARIANT_ORIGINAL_NO_PADDING) == 0) {
+    ESP_LOGD(TAG, "base64 decoded variant=no_padding in_len=%zu out_len=%zu",
+             normalized_len, *out_len);
+    return 0;
+  }
+
+  if (sodium_base642bin(out, out_size, normalized, normalized_len, NULL,
+                        out_len, NULL, sodium_base64_VARIANT_ORIGINAL) == 0) {
+    ESP_LOGD(TAG, "base64 decoded variant=original in_len=%zu out_len=%zu",
+             normalized_len, *out_len);
+    return 0;
+  }
+
+  return -1;
 }
 
 // Simple base64 encode using libsodium, strip trailing '='
@@ -181,7 +224,7 @@ int rsa_decrypt_aes_key(const char *encrypted_b64, uint8_t *out_key,
   size_t encrypted_len = 0;
   if (b64_decode(encrypted_b64, encrypted, sizeof(encrypted), &encrypted_len) !=
       0) {
-    ESP_LOGE(TAG, "Failed to decode RSA-encrypted AES key");
+    ESP_LOGE(TAG, "Failed to decode RSA-encrypted AES key (base64)");
     return -1;
   }
 
@@ -196,11 +239,18 @@ int rsa_decrypt_aes_key(const char *encrypted_b64, uint8_t *out_key,
   int ret = mbedtls_rsa_pkcs1_decrypt(rsa, mbedtls_ctr_drbg_random, &s_ctr_drbg,
                                       &olen, encrypted, out_key, out_key_size);
   if (ret != 0) {
-    ESP_LOGE(TAG, "RSA AES key decrypt failed: -0x%04x", -ret);
+    ESP_LOGE(TAG,
+             "RSA AES key decrypt failed: enc_len=%zu expected=256 ret=-0x%04x",
+             encrypted_len, -ret);
     return -1;
   }
 
   *out_key_len = olen;
   ESP_LOGI(TAG, "Decrypted AES key: %zu bytes", olen);
   return 0;
+}
+
+int rtsp_decode_airplay_base64(const char *input_b64, uint8_t *out,
+                               size_t out_size, size_t *out_len) {
+  return b64_decode(input_b64, out, out_size, out_len);
 }

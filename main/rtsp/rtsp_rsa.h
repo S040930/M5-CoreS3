@@ -44,3 +44,20 @@ int rsa_apple_challenge_response(const char *challenge_b64, uint32_t ip_addr,
  */
 int rsa_decrypt_aes_key(const char *encrypted_b64, uint8_t *out_key,
                         size_t out_key_size, size_t *out_key_len);
+
+/**
+ * Decode AirPlay base64 fields with tolerant handling.
+ *
+ * Supports common sender differences:
+ * - Missing padding
+ * - URL-safe alphabet ('-' and '_')
+ * - Embedded whitespace/newlines
+ *
+ * @param input_b64      Base64 text to decode
+ * @param out            Output buffer for decoded bytes
+ * @param out_size       Size of output buffer
+ * @param out_len        Decoded byte length on success
+ * @return 0 on success, -1 on failure
+ */
+int rtsp_decode_airplay_base64(const char *input_b64, uint8_t *out,
+                               size_t out_size, size_t *out_len);

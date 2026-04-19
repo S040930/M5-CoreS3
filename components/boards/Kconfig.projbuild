@@ -1,57 +1,15 @@
 menu "Board Configuration"
-    choice BOARD_TARGET
-        prompt "Select Target Board"
-        default BOARD_ESP32_GENERIC if IDF_TARGET_ESP32
-        default BOARD_ESP32S3_GENERIC if IDF_TARGET_ESP32S3
+    # This firmware targets M5Stack CoreS3 only (ESP32-S3).
 
-        config BOARD_SQUEEZEAMP
-            bool "SqueezeAMP (8MB flash)"
-            depends on IDF_TARGET_ESP32
-
-        config BOARD_SQUEEZEAMP_4M
-            bool "SqueezeAMP (4MB flash)"
-            depends on IDF_TARGET_ESP32
-
-        config BOARD_ESP32S3_GENERIC
-            bool "ESP32-S3 Generic"
-            depends on IDF_TARGET_ESP32S3
-
-        config BOARD_ESP32_GENERIC
-            bool "ESP32 Board with >4M PSRAM"
-            depends on IDF_TARGET_ESP32
-
-        config BOARD_ESPARAGUS_AUDIO_BRICK
-            bool "Esparagus Audio Brick (ESP32, TAS58xx)"
-            depends on IDF_TARGET_ESP32
-
-        config BOARD_ESPARAGUS_AUDIO_BRICK_S3
-            bool "Esparagus Audio Brick (ESP32-S3, TAS58xx)"
-            depends on IDF_TARGET_ESP32S3
-
-        config BOARD_ESPARAGUS_LOUDER
-            bool "Louder Esparagus / Louder-ESP32 (ESP32, TAS58xx)"
-            depends on IDF_TARGET_ESP32
-
-        config BOARD_ESPARAGUS_LOUDER_S3
-            bool "Louder Esparagus S3 / Louder-ESP32-S3 (ESP32-S3, TAS58xx)"
-            depends on IDF_TARGET_ESP32S3
-
-    endchoice
+    config BOARD_M5STACK_CORES3
+        bool "M5Stack CoreS3"
+        default y
+        help
+            Fixed target: M5Stack CoreS3 with onboard AW88298 speaker path via BSP.
 
     config BOARD_TARGET_PATH
         string
-        default "squeezeamp" if BOARD_SQUEEZEAMP
-        default "squeezeamp" if BOARD_SQUEEZEAMP_4M
-        default "esp32s3-generic" if BOARD_ESP32S3_GENERIC
-        default "esp32-generic" if BOARD_ESP32_GENERIC
-        default "esparagus-audio-brick" if BOARD_ESPARAGUS_AUDIO_BRICK
-        default "esparagus-audio-brick" if BOARD_ESPARAGUS_AUDIO_BRICK_S3
-        default "esparagus-audio-brick" if BOARD_ESPARAGUS_LOUDER
-        default "esparagus-audio-brick" if BOARD_ESPARAGUS_LOUDER_S3
-
-    config BOARD_SQUEEZEAMP_COMMON
-        bool
-        default y if BOARD_SQUEEZEAMP || BOARD_SQUEEZEAMP_4M
+        default "m5stack-core-s3"
 
     menu "Pin Configuration"
         menu "LED GPIOs"
@@ -68,7 +26,7 @@ menu "Board Configuration"
                     GPIO for error LED. Set to -1 to disable.
 
             config LED_RGB_GPIO
-                int "RGB LED GPIO (WS2812)"
+                int "RGB LED (WS2812)"
                 default -1
                 help
                     GPIO for addressable RGB LED (WS2812). Set to -1 to disable.
@@ -80,7 +38,7 @@ menu "Board Configuration"
                 default -1
                 help
                     I2S Master (system) Clock GPIO pin to use; needed with some I2S conversion boards.
-                                        
+
             config I2S_BCK_IO
                 int "I2S Bit Clock GPIO"
                 default -1
@@ -116,7 +74,7 @@ menu "Board Configuration"
                 int "I2S VCC GPIO"
                 default -1
                 help
-                    GPIO to provide VCC to I2S DAC if powered from GPIO. 
+                    GPIO to provide VCC to I2S DAC if powered from GPIO.
                     20mA maximum! Set to -1 to disable.
         endmenu
 
@@ -126,7 +84,7 @@ menu "Board Configuration"
                 default -1
                 help
                     GPIO for battery voltage monitoring ADC channel. Set to -1 to disable.
-                    
+
             config DAC_I2C_SDA
                 int "I2C SDA GPIO for DAC"
                 default -1

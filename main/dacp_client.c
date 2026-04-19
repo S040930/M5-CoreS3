@@ -233,15 +233,42 @@ void dacp_init(void) {
     return;
   }
   s_mutex = xSemaphoreCreateMutex();
+  if (!s_mutex) {
+    ESP_LOGE(TAG, "Failed to create DACP mutex");
+    return;
+  }
   s_cmd_queue = xQueueCreate(CMD_QUEUE_LEN, CMD_PATH_MAX);
+  if (!s_cmd_queue) {
+    ESP_LOGE(TAG, "Failed to create DACP command queue");
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
+    return;
+  }
   xTaskCreate(dacp_worker_task, "dacp_wk", WORKER_STACK, NULL, 4,
               &s_worker_handle);
+  if (!s_worker_handle) {
+    ESP_LOGE(TAG, "Failed to create DACP worker task");
+    vQueueDelete(s_cmd_queue);
+    s_cmd_queue = NULL;
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
+    return;
+  }
   s_initialized = true;
   ESP_LOGI(TAG, "DACP client initialized");
 }
 
+bool dacp_is_initialized(void) {
+  return s_initialized && s_mutex != NULL && s_cmd_queue != NULL;
+}
+
 void dacp_set_session(const char *dacp_id, const char *active_remote,
                       uint32_t client_ip) {
+  if (!dacp_is_initialized()) {
+    ESP_LOGW(TAG, "DACP not initialized; skipping session update");
+    return;
+  }
+
   xSemaphoreTake(s_mutex, portMAX_DELAY);
 
   const char *id = dacp_id ? dacp_id : "";
@@ -274,7 +301,9 @@ void dacp_set_session(const char *dacp_id, const char *active_remote,
     // the user presses a button.  Posting to front so it runs before any
     // queued commands; non-blocking drop is fine if queue is full.
     char sentinel[CMD_PATH_MAX] = {CMD_DISCOVER[0]};
-    xQueueSendToFront(s_cmd_queue, sentinel, 0);
+    if (s_cmd_queue) {
+      xQueueSendToFront(s_cmd_queue, sentinel, 0);
+    }
   }
 }
 

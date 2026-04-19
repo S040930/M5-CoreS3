@@ -48,6 +48,18 @@ int socket_utils_bind_udp(uint16_t port, int recv_timeout_sec, int recvbuf_size,
   return sock;
 }
 
+int socket_utils_send_all(int socket, const uint8_t *data, size_t len) {
+  size_t sent = 0;
+  while (sent < len) {
+    ssize_t r = send(socket, data + sent, len - sent, 0);
+    if (r <= 0) {
+      return -1;
+    }
+    sent += (size_t)r;
+  }
+  return 0;
+}
+
 int socket_utils_bind_tcp_listener(uint16_t port, int backlog, bool nonblocking,
                                    uint16_t *bound_port) {
   int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

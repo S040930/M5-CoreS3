@@ -33,6 +33,28 @@ struct audio_decoder {
 
 static const char *TAG = "audio_dec";
 
+static int validate_decode_output(int dec_channels, int fallback_channels,
+                                  size_t decoded_size,
+                                  size_t output_capacity_samples,
+                                  audio_decode_info_t *info) {
+  if (dec_channels <= 0) dec_channels = fallback_channels;
+  if (dec_channels <= 0) dec_channels = MAX_FALLBACK_CHANNELS;
+  size_t samples = decoded_size / ((size_t)dec_channels * sizeof(int16_t));
+  if (samples > output_capacity_samples) samples = output_capacity_samples;
+  if (info) info->channels = dec_channels;
+  return (int)samples;
+}
+
+static esp_aac_dec_cfg_t configure_aac_decoder(const audio_format_t *fmt) {
+  esp_aac_dec_cfg_t cfg = ESP_AAC_DEC_CONFIG_DEFAULT();
+  cfg.sample_rate = fmt->sample_rate;
+  cfg.channel = fmt->channels;
+  cfg.bits_per_sample = fmt->bits_per_sample ? fmt->bits_per_sample : 16;
+  cfg.no_adts_header = false;
+  cfg.aac_plus_enable = false;
+  return cfg;
+}
+
 // Reopen the AAC decoder to reset its internal state after a corrupt frame.
 // The codec's state machine can get stuck after certain errors (e.g. error 20)
 // and will continue failing every subsequent frame until it is recreated.
@@ -42,13 +64,7 @@ static void aac_decoder_reset(audio_decoder_t *decoder) {
     decoder->aac_decoder = NULL;
   }
 
-  esp_aac_dec_cfg_t aac_cfg = ESP_AAC_DEC_CONFIG_DEFAULT();
-  aac_cfg.sample_rate = decoder->format.sample_rate;
-  aac_cfg.channel = decoder->format.channels;
-  aac_cfg.bits_per_sample =
-      decoder->format.bits_per_sample ? decoder->format.bits_per_sample : 16;
-  aac_cfg.no_adts_header = false;
-  aac_cfg.aac_plus_enable = false;
+  esp_aac_dec_cfg_t aac_cfg = configure_aac_decoder(&decoder->format);
 
   esp_audio_err_t err =
       esp_aac_dec_open(&aac_cfg, sizeof(aac_cfg), &decoder->aac_decoder);
@@ -128,13 +144,7 @@ audio_decoder_t *audio_decoder_create(const audio_decoder_config_t *config) {
   } else if (codec_is_aac(config->format.codec)) {
     decoder->kind = AUDIO_DECODER_AAC;
 
-    esp_aac_dec_cfg_t aac_cfg = ESP_AAC_DEC_CONFIG_DEFAULT();
-    aac_cfg.sample_rate = config->format.sample_rate;
-    aac_cfg.channel = config->format.channels;
-    aac_cfg.bits_per_sample =
-        config->format.bits_per_sample ? config->format.bits_per_sample : 16;
-    aac_cfg.no_adts_header = false;
-    aac_cfg.aac_plus_enable = false;
+    esp_aac_dec_cfg_t aac_cfg = configure_aac_decoder(&config->format);
 
     esp_audio_err_t err =
         esp_aac_dec_open(&aac_cfg, sizeof(aac_cfg), &decoder->aac_decoder);
@@ -228,21 +238,9 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
       return -1;
     }
 
-    int dec_channels = dec_info.channel > 0 ? dec_info.channel : channels;
-    if (dec_channels <= 0) {
-      dec_channels = MAX_FALLBACK_CHANNELS;
-    }
-
-    size_t decoded_samples =
-        frame.decoded_size / (dec_channels * sizeof(int16_t));
-    if (decoded_samples > output_capacity_samples) {
-      decoded_samples = output_capacity_samples;
-    }
-
-    if (info) {
-      info->channels = dec_channels;
-    }
-    return (int)decoded_samples;
+    return validate_decode_output(
+        dec_info.channel > 0 ? dec_info.channel : channels, channels,
+        frame.decoded_size, output_capacity_samples, info);
   }
 
   if (decoder->kind == AUDIO_DECODER_AAC) {
@@ -290,21 +288,9 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
       return -1;
     }
 
-    int dec_channels = dec_info.channel > 0 ? dec_info.channel : channels;
-    if (dec_channels <= 0) {
-      dec_channels = MAX_FALLBACK_CHANNELS;
-    }
-
-    size_t decoded_samples =
-        frame.decoded_size / (dec_channels * sizeof(int16_t));
-    if (decoded_samples > output_capacity_samples) {
-      decoded_samples = output_capacity_samples;
-    }
-
-    if (info) {
-      info->channels = dec_channels;
-    }
-    return (int)decoded_samples;
+    return validate_decode_output(
+        dec_info.channel > 0 ? dec_info.channel : channels, channels,
+        frame.decoded_size, output_capacity_samples, info);
   }
 
   return -1;

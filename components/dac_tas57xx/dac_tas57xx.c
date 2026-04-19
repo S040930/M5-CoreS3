@@ -77,8 +77,7 @@ static uint8_t tas57xx_addr;
 static i2c_master_bus_handle_t s_bus_handle = NULL;
 static i2c_master_dev_handle_t tas57xx_device_handle;
 static dac_power_mode_t s_power_state = DAC_POWER_OFF;
-static uint8_t *s_hf_buf = NULL; // Cached hybrid flow (TAS5754M only)
-static long s_hf_size = 0;
+static uint8_t *s_hf_buf = NULL;
 static SemaphoreHandle_t s_dac_mutex = NULL;
 
 static esp_err_t write_cmd(tas57xx_cmd_e cmd, ...);
@@ -163,7 +162,6 @@ static esp_err_t tas57xx_init(void *i2c_bus) {
       uint8_t *buf = malloc(size);
       if (buf && fread(buf, 1, size, f) == (size_t)size) {
         s_hf_buf = buf;
-        s_hf_size = size;
         err = tas57xx_write_hf(s_hf_buf);
       } else {
         ESP_LOGE(TAG, "Failed to read HF file %s", hf_path);
@@ -212,7 +210,7 @@ static esp_err_t tas57xx_deinit(void) {
     vSemaphoreDelete(s_dac_mutex);
     s_dac_mutex = NULL;
   }
-  s_hf_size = 0;
+  s_hf_buf = NULL;
   return err;
 }
 

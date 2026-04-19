@@ -15,12 +15,11 @@
 #include "freertos/task.h"
 
 #include "rtsp_conn.h"
-#include "rtsp_crypto.h"
 #include "rtsp_handlers.h"
 #include "rtsp_message.h"
+#include "wifi.h"
 
 #include "ntp_clock.h"
-#include "ptp_clock.h"
 #include "rtsp_events.h"
 #include "dacp_client.h"
 
@@ -61,6 +60,12 @@ static int current_slot = 0;
 // to send a DACP resume command and keep waiting for reconnect.
 static volatile bool s_resume_requested = false;
 
+static void log_ipv4_addr(const char *prefix, uint32_t ip_addr) {
+  ESP_LOGI(TAG, "%s%d.%d.%d.%d", prefix, ip_addr & 0xFF,
+           (ip_addr >> 8) & 0xFF, (ip_addr >> 16) & 0xFF,
+           (ip_addr >> 24) & 0xFF);
+}
+
 // Public API for volume control
 void airplay_set_volume(float volume_db) {
   client_slot_t *c = &clients[current_slot];
@@ -81,7 +86,6 @@ void rtsp_server_request_resume(void) {
   s_resume_requested = true;
 }
 
-// Helper to grow buffer
 static uint8_t *grow_buffer(uint8_t *old_buf, size_t old_size, size_t new_size,
                             size_t data_len) {
   (void)old_size;
@@ -100,8 +104,49 @@ static uint8_t *grow_buffer(uint8_t *old_buf, size_t old_size, size_t new_size,
   return new_buf;
 }
 
+static bool ensure_buffer_capacity(uint8_t **buffer, size_t *capacity,
+                                   size_t data_len, size_t extra_len) {
+  if (data_len + extra_len <= *capacity) {
+    return true;
+  }
+  if (data_len + extra_len > RTSP_BUFFER_LARGE) {
+    return false;
+  }
+
+  size_t new_cap = *capacity == 0 ? RTSP_BUFFER_INITIAL : *capacity;
+  while (data_len + extra_len > new_cap) {
+    new_cap = new_cap < RTSP_BUFFER_LARGE ? RTSP_BUFFER_LARGE : new_cap * 2;
+    if (new_cap > RTSP_BUFFER_LARGE) {
+      return false;
+    }
+  }
+
+  uint8_t *new_buf = grow_buffer(*buffer, *capacity, new_cap, data_len);
+  if (!new_buf) {
+    return false;
+  }
+
+  *buffer = new_buf;
+  *capacity = new_cap;
+  return true;
+}
+
+static bool append_buffer_bytes(uint8_t **buffer, size_t *capacity,
+                                size_t *data_len, const uint8_t *data,
+                                size_t len) {
+  if (len == 0) {
+    return true;
+  }
+  if (!ensure_buffer_capacity(buffer, capacity, *data_len, len)) {
+    return false;
+  }
+  memcpy(*buffer + *data_len, data, len);
+  *data_len += len;
+  return true;
+}
+
 // Process buffered RTSP requests
-static void process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
+static bool process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
                                 size_t *buf_len) {
   while (*buf_len > 0 && !slot->should_stop) {
     const uint8_t *header_end = rtsp_find_header_end(buffer, *buf_len);
@@ -145,6 +190,8 @@ static void process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
     }
     *buf_len -= total_len;
   }
+
+  return false;
 }
 
 // Client task
@@ -190,54 +237,27 @@ static void client_task(void *pvParameters) {
   }
 
   size_t buf_len = 0;
+  const char *cleanup_reason = "loop_exit";
+  int cleanup_errno = 0;
 
   // Socket timeout for stop signal responsiveness
   struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
   setsockopt(slot->socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   while (server_running && !slot->should_stop) {
-    if (conn->encrypted_mode) {
-      // Encrypted mode
-      while (server_running && conn->encrypted_mode && !slot->should_stop) {
-        if (buf_len >= buf_capacity - 1024) {
-          size_t new_cap = buf_capacity < RTSP_BUFFER_LARGE ? RTSP_BUFFER_LARGE
-                                                            : buf_capacity * 2;
-          if (new_cap > RTSP_BUFFER_LARGE) {
-            goto cleanup;
-          }
-          uint8_t *new_buf =
-              grow_buffer(buffer, buf_capacity, new_cap, buf_len);
-          if (!new_buf) {
-            goto cleanup;
-          }
-          buffer = new_buf;
-          buf_capacity = new_cap;
-        }
-
-        int block_len = rtsp_crypto_read_block(
-            slot->socket, conn, buffer + buf_len, buf_capacity - buf_len);
-        if (block_len <= 0) {
-          if (slot->should_stop || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-            goto cleanup;
-          }
-          continue;
-        }
-
-        buf_len += (size_t)block_len;
-        process_rtsp_buffer(slot, buffer, &buf_len);
-      }
-      goto cleanup;
-    }
-
-    // Plain-text mode
+    // Plain-text mode (AirPlay 1 RTSP is never encrypted)
     if (buf_len >= buf_capacity - 1024) {
       size_t new_cap = buf_capacity < RTSP_BUFFER_LARGE ? RTSP_BUFFER_LARGE
                                                         : buf_capacity * 2;
       if (new_cap > RTSP_BUFFER_LARGE) {
+        cleanup_reason = "plain_buffer_limit";
+        cleanup_errno = ENOMEM;
         break;
       }
       uint8_t *new_buf = grow_buffer(buffer, buf_capacity, new_cap, buf_len);
       if (!new_buf) {
+        cleanup_reason = "plain_buffer_alloc_failed";
+        cleanup_errno = ENOMEM;
         break;
       }
       buffer = new_buf;
@@ -250,24 +270,30 @@ static void client_task(void *pvParameters) {
       if (recv_len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         continue;
       }
+      cleanup_reason = (recv_len == 0) ? "peer_closed_plain_socket" : "plain_recv_failed";
+      cleanup_errno = (recv_len == 0) ? 0 : errno;
       break;
     }
     buf_len += (size_t)recv_len;
     process_rtsp_buffer(slot, buffer, &buf_len);
   }
 
-cleanup:
-  ESP_LOGI(TAG, "Client slot %d disconnected", slot_idx);
+  ESP_LOGI(TAG,
+           "Client slot %d disconnected (reason=%s errno=%d buf=%zu)",
+           slot_idx, cleanup_reason, cleanup_errno, buf_len);
   free(buffer);
   close(slot->socket);
   slot->socket = -1;
 
   // Immediate: stop audio and NTP
   audio_receiver_stop();
-  audio_output_flush();
+  if (audio_output_is_active()) {
+    audio_output_flush();
+  } else {
+    ESP_LOGD(TAG, "Skip audio_output_flush in cleanup: output inactive");
+  }
   ntp_clock_stop();
 
-#ifdef CONFIG_AIRPLAY_FORCE_V1
   // AirPlay v1 grace period: iOS sends TEARDOWN + TCP close for both pause
   // and genuine disconnect. Wait briefly and probe DACP mDNS to tell them
   // apart. Emit PAUSED immediately so listeners (e.g. BT switching) don't
@@ -299,19 +325,16 @@ cleanup:
         ESP_LOGI(TAG, "DACP still advertised — waiting for reconnect");
       }
       while (stay && !slot->should_stop) {
-        // Wait 5 s between probes (10 × 500 ms), checking flags each tick
         for (int i = 0; i < 10 && !slot->should_stop; i++) {
           vTaskDelay(pdMS_TO_TICKS(500));
           if (s_resume_requested) {
             s_resume_requested = false;
-            ESP_LOGI(TAG,
-                     "Resume requested via button — extending grace period");
+            ESP_LOGI(TAG, "Resume requested via button — extending grace period");
           }
         }
         if (slot->should_stop) {
           break;
         }
-        // Re-probe: still advertised?
         stay = dacp_probe_service();
         if (stay) {
           ESP_LOGD(TAG, "DACP still advertised — continuing wait");
@@ -322,7 +345,6 @@ cleanup:
     }
 
     if (slot->is_old) {
-      // New client connected during grace period — treat as reconnect
       ESP_LOGI(TAG, "Client reconnected during grace period");
     } else {
       ESP_LOGI(TAG, "Grace period expired — full disconnect");
@@ -330,24 +352,8 @@ cleanup:
       rtsp_events_emit(RTSP_EVENT_DISCONNECTED, NULL);
     }
   } else {
-    // Forcefully stopped (server shutdown or replaced by new client)
     dacp_clear_session();
     rtsp_events_emit(RTSP_EVENT_DISCONNECTED, NULL);
-  }
-#else
-  dacp_clear_session();
-  rtsp_events_emit(RTSP_EVENT_DISCONNECTED, NULL);
-#endif
-
-  // When being replaced by a new client (is_old), skip global state changes —
-  // the new session's SETUP already manages PTP and the event port task.
-  if (!slot->is_old) {
-    ptp_clock_init(); // Restart PTP (stopped during v1 SETUP to free sockets)
-    rtsp_stop_event_port_task();
-  } else if (rtsp_event_port_listen_socket() >= 0 &&
-             rtsp_event_port_listen_socket() == conn->event_socket) {
-    // Old task still using our socket — stop it before closing
-    rtsp_stop_event_port_task();
   }
 
   if (conn->event_socket >= 0) {
@@ -445,7 +451,19 @@ static void server_task(void *pvParameters) {
       continue;
     }
 
-    ESP_LOGI(TAG, "New client connected");
+    uint32_t client_ip = client_addr.sin_addr.s_addr;
+    bool from_softap = wifi_is_ap_client_ip(client_ip);
+    log_ipv4_addr(from_softap ? "Rejecting SoftAP AirPlay client: "
+                              : "New AirPlay client: ",
+                  client_ip);
+
+    if (from_softap) {
+      ESP_LOGW(TAG,
+               "SoftAP client not allowed for AirPlay; connect the phone to "
+               "the same infrastructure WiFi as the device");
+      close(new_socket);
+      continue;
+    }
 
     // Find slot for new client (alternate between 0 and 1)
     int new_slot = 1 - current_slot;

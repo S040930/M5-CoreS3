@@ -1,5 +1,7 @@
 #pragma once
 
+#include "esp_err.h"
+
 /**
  * Initialize mDNS and advertise AirPlay 2 services
  *
@@ -9,4 +11,4 @@
  *
  * With all required TXT records for iOS to recognize the device
  */
-void mdns_airplay_init(void);
+esp_err_t mdns_airplay_init(void);

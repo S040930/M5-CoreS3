@@ -8,6 +8,23 @@
 
 static const char *TAG = "audio_buf";
 
+static int audio_buffer_capacity_for_budget(void) {
+  int frames = (CONFIG_AUDIO_MAX_BUFFER_MS * 44100) /
+               (1000 * AAC_FRAMES_PER_PACKET);
+  if ((CONFIG_AUDIO_MAX_BUFFER_MS * 44100) %
+          (1000 * AAC_FRAMES_PER_PACKET) !=
+      0) {
+    frames++;
+  }
+  if (frames < 16) {
+    frames = 16;
+  }
+  if (frames > MAX_RING_BUFFER_FRAMES) {
+    frames = MAX_RING_BUFFER_FRAMES;
+  }
+  return frames;
+}
+
 /* ---------- helpers for the slot pool ---------- */
 
 static inline uint8_t *slot_ptr(audio_buffer_t *b, uint16_t slot) {
@@ -58,6 +75,9 @@ static bool audio_buffer_queue_chunk(audio_buffer_t *buffer,
             (buffer->count - 1) * sizeof(uint16_t));
     buffer->count--;
     buffer->free_stack[buffer->free_top++] = victim;
+    if (stats) {
+      stats->buffer_overruns++;
+    }
     /* Take one token from the semaphore to keep it in sync */
     xSemaphoreTakeFromISR(buffer->data_ready, NULL);
   }
@@ -65,7 +85,7 @@ static bool audio_buffer_queue_chunk(audio_buffer_t *buffer,
   if (buffer->free_top == 0) {
     portEXIT_CRITICAL(&buffer->lock);
     if (stats) {
-      stats->buffer_underruns++;
+      stats->buffer_overruns++;
     }
     return false;
   }
@@ -117,7 +137,7 @@ esp_err_t audio_buffer_init(audio_buffer_t *buffer) {
 
   portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
   buffer->lock = lock;
-  buffer->capacity = MAX_RING_BUFFER_FRAMES;
+  buffer->capacity = audio_buffer_capacity_for_budget();
   buffer->slot_size = BYTES_PER_FRAME;
   buffer->count = 0;
 
@@ -265,7 +285,14 @@ bool audio_buffer_take(audio_buffer_t *buffer, void **item, size_t *item_size,
 
   /* Block until a frame is available */
   if (xSemaphoreTake(buffer->data_ready, ticks) != pdTRUE) {
-    return false;
+    int count = 0;
+    portENTER_CRITICAL(&buffer->lock);
+    count = buffer->count;
+    portEXIT_CRITICAL(&buffer->lock);
+    if (count <= 0) {
+      return false;
+    }
+    ESP_LOGW(TAG, "Repairing data_ready desync: buffered_frames=%d", count);
   }
 
   portENTER_CRITICAL(&buffer->lock);

@@ -13,6 +13,7 @@ typedef enum {
   BOARD_I2C_DISP_ID, ///< I2C master bus used by the display
   BOARD_SPI_ETH_ID,  ///< SPI host used by the Ethernet controller
   BOARD_SPI_DISP_ID, ///< SPI host used by the display
+  BOARD_AUDIO_SPK_ID, ///< Audio output device used by the speaker path
 } board_res_id_t;
 
 /**

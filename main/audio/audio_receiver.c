@@ -6,6 +6,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "audio_buffer.h"
 #include "audio_decoder.h"
@@ -13,7 +14,6 @@
 #include "audio_receiver_internal.h"
 #include "audio_stream.h"
 #include "audio_timing.h"
-#include "ptp_clock.h"
 
 #define DEFAULT_SAMPLE_RATE     44100
 #define DEFAULT_CHANNELS        2
@@ -69,7 +69,9 @@ esp_err_t audio_receiver_init(void) {
   receiver.stream = receiver.realtime_stream;
 
   audio_format_t default_format = {0};
-  strcpy(default_format.codec, "AppleLossless");
+  strncpy(default_format.codec, "AppleLossless",
+          sizeof(default_format.codec) - 1);
+  default_format.codec[sizeof(default_format.codec) - 1] = '\0';
   default_format.sample_rate = DEFAULT_SAMPLE_RATE;
   default_format.channels = DEFAULT_CHANNELS;
   default_format.bits_per_sample = DEFAULT_BITS_PER_SAMPLE;
@@ -158,6 +160,16 @@ void audio_receiver_set_encryption(const audio_encrypt_t *encrypt) {
   }
 }
 
+void audio_receiver_clear_encryption(void) {
+  if (!receiver.realtime_stream || !receiver.buffered_stream) {
+    return;
+  }
+  memset(&receiver.realtime_stream->encrypt, 0,
+         sizeof(receiver.realtime_stream->encrypt));
+  memset(&receiver.buffered_stream->encrypt, 0,
+         sizeof(receiver.buffered_stream->encrypt));
+}
+
 void audio_receiver_set_output_latency_us(uint32_t latency_us) {
   if (!receiver.stream) {
     return;
@@ -179,6 +191,12 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   if (!receiver.stream) {
     return;
   }
+
+  ESP_LOGI(TAG,
+           "Applying anchor: stream_type=%d clock_id=%" PRIu64
+           " rtp=%" PRIu32 " net_ns=%" PRIu64 " buffered=%d",
+           receiver.stream->type, clock_id, rtp_time, network_time_ns,
+           audio_buffer_get_frame_count(&receiver.buffer));
 
   // Detect a seek where the buffer content is far displaced from the new
   // anchor position.  Threshold is 5 seconds of samples — large enough to
@@ -255,6 +273,28 @@ void audio_receiver_set_playing(bool playing) {
   }
 }
 
+uint32_t audio_receiver_get_buffered_frames(void) {
+  return (uint32_t)audio_buffer_get_frame_count(&receiver.buffer);
+}
+
+void audio_receiver_get_active_codec(char *codec, size_t len) {
+  if (!codec || len == 0 || !receiver.stream) {
+    return;
+  }
+  strncpy(codec, receiver.stream->format.codec, len - 1);
+  codec[len - 1] = '\0';
+}
+
+audio_stream_type_t audio_receiver_get_stream_type(void) {
+  if (receiver.stream == receiver.buffered_stream) {
+    return AUDIO_STREAM_BUFFERED;
+  }
+  if (receiver.stream == receiver.realtime_stream) {
+    return AUDIO_STREAM_REALTIME;
+  }
+  return AUDIO_STREAM_NONE;
+}
+
 void audio_receiver_reset_timing(void) {
   audio_timing_reset(&receiver.timing);
 }
@@ -311,7 +351,7 @@ esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port) {
   audio_buffer_flush(&receiver.buffer);
   audio_timing_reset(&receiver.timing);
 
-  receiver.timing.ptp_locked = ptp_clock_is_locked();
+  receiver.timing.ptp_locked = false; // AirPlay 1 uses NTP, not PTP
   audio_receiver_reset_blocks();
 
   return receiver.stream->ops->start(receiver.stream, data_port);
@@ -335,7 +375,7 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
   audio_buffer_flush(&receiver.buffer);
   audio_timing_reset(&receiver.timing);
 
-  receiver.timing.ptp_locked = ptp_clock_is_locked();
+  receiver.timing.ptp_locked = false; // AirPlay 1 uses NTP, not PTP
   audio_receiver_reset_blocks();
 
   return receiver.stream->ops->start(receiver.stream, tcp_port);
@@ -381,12 +421,12 @@ void audio_receiver_set_client_control(uint32_t client_ip,
 
 void audio_receiver_stop(void) {
   if (receiver.realtime_stream && receiver.realtime_stream->ops &&
-      receiver.realtime_stream->ops->stop) {
+      receiver.realtime_stream->ops->stop && receiver.realtime_stream->running) {
     receiver.realtime_stream->ops->stop(receiver.realtime_stream);
   }
 
   if (receiver.buffered_stream && receiver.buffered_stream->ops &&
-      receiver.buffered_stream->ops->stop) {
+      receiver.buffered_stream->ops->stop && receiver.buffered_stream->running) {
     receiver.buffered_stream->ops->stop(receiver.buffered_stream);
   }
 
@@ -449,6 +489,20 @@ void audio_receiver_flush(void) {
   receiver.discard_above_rtp_valid = false;
   receiver.arm_gate_on_next_anchor = false;
   receiver.blocks_read_in_sequence = 1;
+}
+
+void audio_timing_force_start(void) {
+  if (receiver.timing.anchor_valid) {
+    ESP_LOGI(TAG, "Timing start: anchor already valid, no fallback needed");
+    return;
+  }
+  receiver.timing.playout_started = true;
+  receiver.timing.ready_time_us = esp_timer_get_time();
+  ESP_LOGI(TAG, "Timing anchor fallback: forcing playout start");
+}
+
+bool audio_receiver_anchor_valid(void) {
+  return audio_timing_is_anchor_valid(&receiver.timing);
 }
 
 void audio_receiver_seek_flush(void) {

@@ -1,8 +1,12 @@
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -15,6 +19,9 @@
 #include "settings.h"
 
 static const char *TAG = "wifi";
+
+/** STA-only bootstrap first: avoids SoftAP on ch1 blocking STA scan/connect on other channels. */
+#define WIFI_STA_FIRST_TIMEOUT_MS 30000
 
 // Event group to signal WiFi connection
 static EventGroupHandle_t s_wifi_event_group;
@@ -30,13 +37,65 @@ static esp_netif_t *s_ap_netif = NULL;
 static bool s_wifi_initialized = false;
 static bool s_sta_connected = false;
 static bool s_bssid_set = false;
+static bool s_ap_enabled = false;
 static esp_timer_handle_t s_retry_timer = NULL;
+static QueueHandle_t s_ctrl_queue = NULL;
+static TaskHandle_t s_ctrl_task = NULL;
+/** When true, WIFI_EVENT_STA_START skips esp_wifi_connect; wifi_init_apsta runs it
+ *  after post-start channel scan (avoids racing connect before AP channel sync). */
+static bool s_skip_sta_connect_on_sta_start = false;
 
 // Saved AP config from init, used to re-enable AP without duplication
 static wifi_config_t s_ap_config;
 
-static void wifi_select_best_ap(const char *ssid);
-static void scan_and_connect_task(void *arg);
+typedef enum {
+  WIFI_CTRL_SET_AP_ENABLED = 1,
+  WIFI_CTRL_STA_GOT_IP = 2,
+} wifi_ctrl_cmd_type_t;
+
+typedef struct {
+  wifi_ctrl_cmd_type_t type;
+  bool enabled;
+} wifi_ctrl_cmd_t;
+
+static const char *wifi_disconnect_reason_to_str(uint8_t reason) {
+  // Numeric mapping keeps compatibility across ESP-IDF variants where reason
+  // enum names may differ.
+  switch (reason) {
+  case 1:
+    return "unspecified";
+  case 2:
+    return "auth expired";
+  case 3:
+    return "auth leave";
+  case 4:
+    return "assoc expired";
+  case 5:
+    return "assoc too many";
+  case 6:
+    return "not authed";
+  case 7:
+    return "not assoced";
+  case 8:
+    return "assoc leave";
+  case 15:
+    return "4-way handshake timeout";
+  case 200:
+    return "beacon timeout";
+  case 201:
+    return "no ap found";
+  case 202:
+    return "auth fail";
+  case 203:
+    return "assoc fail";
+  case 204:
+    return "handshake timeout";
+  case 205:
+    return "connection fail";
+  default:
+    return "unknown";
+  }
+}
 
 static void retry_timer_callback(void *arg) {
   if (!s_sta_connected) {
@@ -60,30 +119,124 @@ static void schedule_retry(void) {
   esp_timer_start_once(s_retry_timer, (uint64_t)delay_s * 1000000);
 }
 
-static void enable_ap_mode(void) {
-  wifi_mode_t mode;
-  if (esp_wifi_get_mode(&mode) == ESP_OK && mode != WIFI_MODE_APSTA) {
-    ESP_LOGI(TAG, "Re-enabling AP mode for configuration access");
-    if (!s_ap_netif) {
-      s_ap_netif = esp_netif_create_default_wifi_ap();
-    }
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_set_config(WIFI_IF_AP, &s_ap_config);
+esp_err_t wifi_set_ap_enabled(bool enabled);
+
+static void deferred_sta_got_ip_work(void) {
+  esp_netif_ip_info_t ip_info;
+  if (s_sta_netif && esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK) {
+    ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&ip_info.ip));
+  } else {
+    ESP_LOGI(TAG, "STA got IP (netif info not ready)");
   }
+  s_retry_num = 0;
+  s_sta_connected = true;
+  xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+  xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
+  ESP_LOGI(TAG, "STA connected, disabling setup AP");
+  esp_err_t err = wifi_set_ap_enabled(false);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Disable setup AP failed: %s", esp_err_to_name(err));
+  }
+}
+
+static void wifi_ctrl_task(void *arg) {
+  (void)arg;
+  wifi_ctrl_cmd_t cmd;
+  while (1) {
+    if (xQueueReceive(s_ctrl_queue, &cmd, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+    if (cmd.type == WIFI_CTRL_SET_AP_ENABLED) {
+      esp_err_t err = wifi_set_ap_enabled(cmd.enabled);
+      if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Deferred AP toggle failed (enabled=%d): %s", cmd.enabled,
+                 esp_err_to_name(err));
+      }
+    } else if (cmd.type == WIFI_CTRL_STA_GOT_IP) {
+      deferred_sta_got_ip_work();
+    }
+  }
+}
+
+static void post_ap_enabled(bool enabled) {
+  if (!s_ctrl_queue) {
+    return;
+  }
+  wifi_ctrl_cmd_t cmd = {
+      .type = WIFI_CTRL_SET_AP_ENABLED,
+      .enabled = enabled,
+  };
+  if (xQueueSend(s_ctrl_queue, &cmd, 0) != pdTRUE) {
+    ESP_LOGW(TAG, "WiFi control queue full, dropping AP toggle command");
+  }
+}
+
+/** After esp_wifi_start in APSTA, align SoftAP channel with target SSID (best-effort). */
+static void sync_softap_channel_to_target_ssid(const uint8_t *target_ssid) {
+  if (!target_ssid || target_ssid[0] == '\0') {
+    return;
+  }
+  wifi_scan_config_t scan_config = {
+      .ssid = (uint8_t *)target_ssid,
+      .show_hidden = true,
+      .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+  };
+  esp_err_t scan_err = esp_wifi_scan_start(&scan_config, true);
+  uint16_t ap_count = 0;
+  if (scan_err != ESP_OK) {
+    ESP_LOGW(TAG, "Channel sync scan failed: %s", esp_err_to_name(scan_err));
+    return;
+  }
+  esp_wifi_scan_get_ap_num(&ap_count);
+  ESP_LOGI(TAG, "Target-SSID scan matches: %u", (unsigned)ap_count);
+  if (ap_count == 0) {
+    return;
+  }
+  wifi_ap_record_t *ap_list = malloc(sizeof(wifi_ap_record_t) * ap_count);
+  if (!ap_list ||
+      esp_wifi_scan_get_ap_records(&ap_count, ap_list) != ESP_OK ||
+      ap_count == 0) {
+    free(ap_list);
+    return;
+  }
+  s_ap_config.ap.channel = ap_list[0].primary;
+  ESP_LOGI(TAG, "Syncing SoftAP channel to STA target channel: %d",
+           s_ap_config.ap.channel);
+  esp_err_t ch_err = esp_wifi_set_config(WIFI_IF_AP, &s_ap_config);
+  if (ch_err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to apply SoftAP channel: %s", esp_err_to_name(ch_err));
+  }
+  free(ap_list);
+}
+
+static void enable_ap_mode(void) {
+  post_ap_enabled(true);
 }
 
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data) {
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-    // Defer scan+connect to a separate task — the blocking scan uses too
-    // much stack to run inside the sys_evt event loop (2–4 KB).
-    xTaskCreate(scan_and_connect_task, "wifi_scan", 4096, NULL, 3, NULL);
+    if (s_skip_sta_connect_on_sta_start) {
+      return;
+    }
+    esp_wifi_connect();
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
     s_sta_connected = false;
     wifi_event_sta_disconnected_t *disconnected =
         (wifi_event_sta_disconnected_t *)event_data;
-    ESP_LOGI(TAG, "Disconnected from AP, reason: %d", disconnected->reason);
+    ESP_LOGI(TAG, "Disconnected from AP, reason: %d (%s)",
+             disconnected->reason,
+             wifi_disconnect_reason_to_str(disconnected->reason));
+    if (disconnected->reason == 201) {
+      ESP_LOGW(TAG,
+               "hint(201): AP not seen — use 2.4GHz hotspot, exact SSID, or "
+               "STA-first will retry with SoftAP");
+    } else if (disconnected->reason == 202) {
+      ESP_LOGW(TAG,
+               "hint(202): auth failed — check password; WPA3 hotspots need "
+               "CONFIG_ESP_WIFI_ENABLE_WPA3_SAE");
+    }
 
     s_retry_num++;
 
@@ -105,146 +258,112 @@ static void event_handler(void *arg, esp_event_base_t event_base,
       schedule_retry();
     }
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-    s_retry_num = 0;
-    s_sta_connected = true;
-    xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-
-    // Disable AP mode when STA connects
-    wifi_mode_t mode;
-    if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_APSTA) {
-      ESP_LOGI(TAG, "STA connected, disabling AP mode");
-      esp_wifi_set_mode(WIFI_MODE_STA);
+    wifi_ctrl_cmd_t cmd = {
+        .type = WIFI_CTRL_STA_GOT_IP,
+        .enabled = false,
+    };
+    if (!s_ctrl_queue || xQueueSend(s_ctrl_queue, &cmd, 0) != pdTRUE) {
+      ESP_LOGW(TAG, "WiFi ctrl queue full; handling STA GOT_IP on event task");
+      deferred_sta_got_ip_work();
     }
   } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+    s_ap_enabled = true;
     ESP_LOGI(TAG, "AP started");
+  } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STOP) {
+    s_ap_enabled = false;
+    ESP_LOGI(TAG, "AP stopped");
   }
 }
 
-// One-shot task: scan for best AP then connect — runs outside the event loop
-// to avoid overflowing the sys_evt stack.
-static void scan_and_connect_task(void *arg) {
-  wifi_config_t cfg;
-  if (esp_wifi_get_config(WIFI_IF_STA, &cfg) == ESP_OK &&
-      strlen((char *)cfg.sta.ssid) > 0) {
-    wifi_select_best_ap((char *)cfg.sta.ssid);
-  }
-  esp_wifi_connect();
-  vTaskDelete(NULL);
-}
-
-// Scan for the best AP matching our SSID and set its BSSID in the STA config
-static void wifi_select_best_ap(const char *ssid) {
-  wifi_scan_config_t scan_config = {
-      .ssid = (uint8_t *)ssid,
-      .bssid = NULL,
-      .channel = 0,
-      .show_hidden = false,
-      .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-      .scan_time = {.active = {.min = 0,
-                               .max = 0}}, // 0, 0 needed for BT co-exist
-  };
-
-  esp_err_t err = esp_wifi_scan_start(&scan_config, true);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Best-AP scan failed: %s", esp_err_to_name(err));
-    return;
-  }
-
-  uint16_t ap_count = 0;
-  esp_wifi_scan_get_ap_num(&ap_count);
-  if (ap_count == 0) {
-    ESP_LOGW(TAG, "Best-AP scan: no APs found for SSID %s", ssid);
-    esp_wifi_scan_get_ap_records(&ap_count, NULL);
-    return;
-  }
-
-  wifi_ap_record_t *ap_list = malloc(sizeof(wifi_ap_record_t) * ap_count);
-  if (!ap_list) {
-    esp_wifi_scan_get_ap_records(&ap_count, NULL);
-    return;
-  }
-
-  esp_wifi_scan_get_ap_records(&ap_count, ap_list);
-
-  // Find AP with strongest signal
-  int best_idx = 0;
-  for (int i = 1; i < ap_count; i++) {
-    if (ap_list[i].rssi > ap_list[best_idx].rssi) {
-      best_idx = i;
-    }
-  }
-
-  ESP_LOGI(TAG, "Found %d APs for SSID '%s', best: " MACSTR " (rssi=%d, ch=%d)",
-           ap_count, ssid, MAC2STR(ap_list[best_idx].bssid),
-           ap_list[best_idx].rssi, ap_list[best_idx].primary);
-
-  for (int i = 0; i < ap_count; i++) {
-    if (i != best_idx) {
-      ESP_LOGI(TAG, "  Other AP: " MACSTR " (rssi=%d, ch=%d)",
-               MAC2STR(ap_list[i].bssid), ap_list[i].rssi, ap_list[i].primary);
-    }
-  }
-
-  // Set BSSID in the STA config to lock to the best AP
-  wifi_config_t sta_cfg;
-  esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
-  memcpy(sta_cfg.sta.bssid, ap_list[best_idx].bssid, 6);
-  sta_cfg.sta.bssid_set = true;
-  esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
-  s_bssid_set = true;
-
-  free(ap_list);
-}
-
-static void wifi_init_base(void) {
+static esp_err_t wifi_init_base(void) {
   if (s_wifi_initialized) {
-    return;
+    return ESP_OK;
   }
 
   s_wifi_event_group = xEventGroupCreate();
+  if (!s_wifi_event_group) {
+    return ESP_ERR_NO_MEM;
+  }
 
   esp_err_t ret = esp_netif_init();
   if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-    ESP_ERROR_CHECK(ret);
+    return ret;
   }
 
   // Create event loop if it doesn't exist
   ret = esp_event_loop_create_default();
   if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-    ESP_ERROR_CHECK(ret);
+    return ret;
   }
 
   esp_event_handler_instance_t instance_any_id;
   esp_event_handler_instance_t instance_got_ip;
-  ESP_ERROR_CHECK(esp_event_handler_instance_register(
-      WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id));
-  ESP_ERROR_CHECK(esp_event_handler_instance_register(
-      IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
+  ret = esp_event_handler_instance_register(
+      WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id);
+  if (ret != ESP_OK) {
+    return ret;
+  }
+  ret = esp_event_handler_instance_register(
+      IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip);
+  if (ret != ESP_OK) {
+    return ret;
+  }
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+  ret = esp_wifi_init(&cfg);
+  if (ret != ESP_OK) {
+    return ret;
+  }
+  ret = esp_wifi_set_ps(WIFI_PS_NONE);
+  if (ret != ESP_OK) {
+    return ret;
+  }
 
   // Create one-shot retry timer (no background task needed)
   const esp_timer_create_args_t timer_args = {
       .callback = retry_timer_callback,
       .name = "wifi_retry",
   };
-  ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_retry_timer));
+  ret = esp_timer_create(&timer_args, &s_retry_timer);
+  if (ret != ESP_OK) {
+    return ret;
+  }
+
+  s_ctrl_queue = xQueueCreate(8, sizeof(wifi_ctrl_cmd_t));
+  if (!s_ctrl_queue) {
+    return ESP_ERR_NO_MEM;
+  }
+
+  BaseType_t created =
+      xTaskCreatePinnedToCore(wifi_ctrl_task, "wifi_ctrl", 4096, NULL, 5,
+                              &s_ctrl_task, tskNO_AFFINITY);
+  if (created != pdPASS) {
+    vQueueDelete(s_ctrl_queue);
+    s_ctrl_queue = NULL;
+    return ESP_ERR_NO_MEM;
+  }
 
   s_wifi_initialized = true;
+  return ESP_OK;
 }
 
-void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
-  wifi_init_base();
+esp_err_t wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
+  esp_err_t ret = wifi_init_base();
+  if (ret != ESP_OK) {
+    return ret;
+  }
 
   if (!s_sta_netif) {
     s_sta_netif = esp_netif_create_default_wifi_sta();
+    if (!s_sta_netif) {
+      return ESP_ERR_NO_MEM;
+    }
   }
   if (!s_ap_netif) {
     s_ap_netif = esp_netif_create_default_wifi_ap();
+    if (!s_ap_netif) {
+      return ESP_ERR_NO_MEM;
+    }
   }
 
   // Configure STA
@@ -258,11 +377,22 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
     has_credentials = true;
   }
 
+  if (has_credentials) {
+    ESP_LOGI(TAG, "Saved STA credentials present for SSID '%s'", ssid);
+  } else {
+    ESP_LOGI(TAG, "No saved STA credentials found");
+  }
+
   wifi_config_t sta_config = {0};
   strncpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid) - 1);
   strncpy((char *)sta_config.sta.password, password,
           sizeof(sta_config.sta.password) - 1);
-  sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+  sta_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
+  sta_config.sta.pmf_cfg.capable = true;
+  sta_config.sta.pmf_cfg.required = false;
+  sta_config.sta.listen_interval = 1;
+  sta_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  sta_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
   // Configure AP and save for later re-enable
   const char *default_ssid = ap_ssid ? ap_ssid : CONFIG_DEFAULT_AP_SSID;
@@ -285,16 +415,90 @@ void wifi_init_apsta(const char *ap_ssid, const char *ap_password) {
   }
 
   s_retry_num = 0;
+  bool radio_started = false;
 
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
-  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &s_ap_config));
-  ESP_ERROR_CHECK(esp_wifi_start());
-
-  ESP_LOGI(TAG, "AP+STA mode started: AP SSID=%s", default_ssid);
   if (has_credentials) {
-    ESP_LOGI(TAG, "Connecting to WiFi: %s", ssid);
+    ESP_LOGI(TAG,
+             "STA-first: connecting to '%s' (SoftAP off until success or "
+             "fallback)",
+             ssid);
+    xEventGroupClearBits(s_wifi_event_group,
+                         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_retry_num = 0;
+    ret = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (ret != ESP_OK) {
+      return ret;
+    }
+    ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (ret != ESP_OK) {
+      return ret;
+    }
+    s_skip_sta_connect_on_sta_start = false;
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+      return ret;
+    }
+    radio_started = true;
+
+    if (wifi_wait_connected(WIFI_STA_FIRST_TIMEOUT_MS)) {
+      wifi_ap_record_t ap_info;
+      if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        s_ap_config.ap.channel = ap_info.primary;
+        ESP_LOGI(TAG,
+                 "STA-first OK: channel %u RSSI %d (verify this SSID in logs "
+                 "matches your router/hotspot)",
+                 (unsigned)ap_info.primary, ap_info.rssi);
+      } else {
+        ESP_LOGI(TAG, "STA-first OK (IP acquired)");
+      }
+      return ESP_OK;
+    }
+
+    ESP_LOGW(TAG,
+             "STA-first failed within %d ms; enabling SoftAP '%s' for setup",
+             WIFI_STA_FIRST_TIMEOUT_MS, default_ssid);
+    esp_timer_stop(s_retry_timer);
+    xEventGroupClearBits(s_wifi_event_group,
+                         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_retry_num = 0;
   }
+
+  ret = esp_wifi_set_mode(WIFI_MODE_APSTA);
+  if (ret != ESP_OK) {
+    return ret;
+  }
+  ret = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+  if (ret != ESP_OK) {
+    return ret;
+  }
+  ret = esp_wifi_set_config(WIFI_IF_AP, &s_ap_config);
+  if (ret != ESP_OK) {
+    return ret;
+  }
+
+  s_skip_sta_connect_on_sta_start = false;
+  if (!radio_started) {
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+      return ret;
+    }
+  }
+
+  if (has_credentials) {
+    sync_softap_channel_to_target_ssid(sta_config.sta.ssid);
+  }
+
+  ESP_LOGI(TAG, "AP+STA: setup AP SSID=%s, SoftAP channel=%d", default_ssid,
+           s_ap_config.ap.channel);
+  if (has_credentials) {
+    ESP_LOGI(TAG, "Connecting STA to: %s (after channel sync)", ssid);
+  }
+
+  s_skip_sta_connect_on_sta_start = false;
+  if (has_credentials) {
+    esp_wifi_connect();
+  }
+  return ESP_OK;
 }
 
 bool wifi_wait_connected(uint32_t timeout_ms) {
@@ -326,6 +530,70 @@ void wifi_get_mac_str(char *mac_str, size_t len) {
 
 bool wifi_is_connected(void) {
   return s_sta_connected;
+}
+
+bool wifi_is_ap_enabled(void) {
+  return s_ap_enabled;
+}
+
+esp_err_t wifi_set_ap_enabled(bool enabled) {
+  if (!s_wifi_initialized) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  wifi_mode_t current_mode;
+  esp_err_t err = esp_wifi_get_mode(&current_mode);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  wifi_mode_t target_mode = enabled ? WIFI_MODE_APSTA : WIFI_MODE_STA;
+  if (current_mode == target_mode && s_ap_enabled == enabled) {
+    return ESP_OK;
+  }
+
+  if (enabled && !s_ap_netif) {
+    s_ap_netif = esp_netif_create_default_wifi_ap();
+  }
+
+  if (enabled) {
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err != ESP_OK) {
+      return err;
+    }
+
+    err = esp_wifi_set_config(WIFI_IF_AP, &s_ap_config);
+    if (err != ESP_OK) {
+      return err;
+    }
+
+    s_ap_enabled = true;
+    ESP_LOGI(TAG, "Setup AP enabled: %s", s_ap_config.ap.ssid);
+    return ESP_OK;
+  }
+
+  err = esp_wifi_set_mode(WIFI_MODE_STA);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  s_ap_enabled = false;
+  ESP_LOGI(TAG, "Setup AP disabled");
+  return ESP_OK;
+}
+
+bool wifi_is_ap_client_ip(uint32_t ip_addr) {
+  if (!s_ap_netif) {
+    return false;
+  }
+
+  esp_netif_ip_info_t ip_info;
+  if (esp_netif_get_ip_info(s_ap_netif, &ip_info) != ESP_OK) {
+    return false;
+  }
+
+  return (ip_addr & ip_info.netmask.addr) ==
+         (ip_info.ip.addr & ip_info.netmask.addr);
 }
 
 esp_err_t wifi_get_ip_str(char *ip_str, size_t len) {
@@ -412,10 +680,19 @@ void wifi_stop(void) {
     esp_wifi_deinit();
     s_wifi_initialized = false;
     s_sta_connected = false;
+    s_ap_enabled = false;
     s_retry_num = 0;
     if (s_wifi_event_group) {
       xEventGroupClearBits(s_wifi_event_group,
                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    }
+    if (s_ctrl_task) {
+      vTaskDelete(s_ctrl_task);
+      s_ctrl_task = NULL;
+    }
+    if (s_ctrl_queue) {
+      vQueueDelete(s_ctrl_queue);
+      s_ctrl_queue = NULL;
     }
   }
 }

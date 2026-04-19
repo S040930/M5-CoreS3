@@ -1,5 +1,66 @@
 menu "Airplay ESP Configuration"
     # Board configuration is now in components/boards/Kconfig.projbuild
+
+    menu "Product Profile"
+        config PRODUCT_AIRPLAY_ONLY
+            bool "Build as AirPlay-first receiver"
+            default y
+            help
+                Optimizes the default product profile for AirPlay playback,
+                minimal setup/status management, and reduced background
+                services. Optional diagnostics remain available via
+                dedicated development switches.
+
+        config ENABLE_DEV_DIAGNOSTICS
+            bool "Expose development diagnostics UI and endpoints"
+            default n
+            help
+                Enables the advanced web console, log streaming, file
+                management, OTA, and other diagnostics endpoints. Keep
+                disabled for the default product build.
+
+        config USB_WEB_CONTROL
+            bool "Enable USB Web Serial management surface"
+            default y if BOARD_M5STACK_CORES3
+            default n
+            help
+                Enables the JSON-line USB control channel intended for the
+                computer-hosted Chromium Web Serial management page.
+
+        config STRUCTURED_TRACE_ENABLE
+            bool "Emit structured JSON Lines for handshake tracing"
+            default y if ENABLE_DEV_DIAGNOSTICS
+            help
+                Emits a second, machine-readable event stream for burning/
+                bring-up validation. The stream is intended for UART or USB
+                capture and should stay disabled in release builds.
+    endmenu
+
+    menu "Security"
+        config WEB_AUTH_REQUIRED
+            bool "Require authentication for web management"
+            default y
+            help
+                When enabled, the device exposes only setup endpoints while in
+                captive-portal/AP mode. Management APIs on the normal network
+                require a short-lived session token obtained via /api/auth/login.
+
+        config ALLOW_INSECURE_RAW_PAIR_VERIFY
+            bool "Allow insecure raw pair-verify compatibility mode"
+            default n
+            help
+                Enables the legacy raw AirPlay pair-verify flow that cannot
+                fully authenticate the client signature. Leave disabled unless
+                you explicitly need compatibility with an old sender.
+
+        config OTA_SIGNATURE_REQUIRED
+            bool "Require OTA signature verification"
+            default n
+            help
+                Placeholder switch for deployments that want to layer detached
+                signature verification on top of the built-in ESP image checks.
+                When enabled, unsigned uploads are rejected.
+    endmenu
     
     menu "LED Configuration"
         config LED_STATUS_BRIGHTNESS
@@ -114,24 +175,53 @@ menu "Airplay ESP Configuration"
         default 1
         help
             Be careful you might not see the access point if you use a channel not allowed in your country.
+
+    config WIFI_FACTORY_DEFAULT_ENABLE
+        bool "Seed NVS with factory STA credentials if none saved"
+        default n
+        help
+            On boot, if NVS has no saved STA SSID, write WIFI_FACTORY_SSID and
+            WIFI_FACTORY_PASSWORD once. Use for lab or single-home images; secrets
+            live in sdkconfig — do not publish builds you do not trust.
+
+    config WIFI_FACTORY_SSID
+        string "Factory STA WiFi SSID"
+        depends on WIFI_FACTORY_DEFAULT_ENABLE
+        default ""
+        help
+            Written to NVS only when no WiFi credentials exist yet.
+
+    config WIFI_FACTORY_PASSWORD
+        string "Factory STA WiFi password"
+        depends on WIFI_FACTORY_DEFAULT_ENABLE
+        default ""
+        help
+            Written together with WIFI_FACTORY_SSID when seeding NVS.
     endmenu
 
     menu "Audio Output"
-    config SPDIF_OUTPUT
-        bool "SPDIF output instead of I2S"
-        default n
+    config AUDIO_TARGET_LATENCY_MS
+        int "Target playout latency (ms)"
+        range 80 1000
+        default 180
         help
-            Enable SPDIF audio output via I2S bit-banging.
-            When enabled, the SPDIF output driver is compiled instead of the
-            standard I2S output driver. Configure the SPDIF data output GPIO
-            in the board pin configuration.
+            Best-effort target for total receiver latency. Used for telemetry
+            and buffer sizing defaults.
+
+    config AUDIO_MAX_BUFFER_MS
+        int "Maximum queued audio depth (ms)"
+        range 80 2000
+        default 240
+        help
+            Caps the jitter/reorder buffer depth to keep memory bounded and
+            avoid accumulating excess latency under poor network conditions.
 
     choice OUTPUT_SAMPLE_RATE
         prompt "Output sample rate"
         default OUTPUT_SAMPLE_RATE_44100
         depends on !DAC_TAS57XX && !DAC_TAS58XX
         help
-            Sample rate for I2S/SPDIF output. If the AirPlay source
+            Sample rate for audio output. If the AirPlay source
             sends a different rate, the audio is resampled automatically.
 
         config OUTPUT_SAMPLE_RATE_44100
@@ -305,25 +395,12 @@ menu "Airplay ESP Configuration"
     menu "AirPlay Protocol"
         config AIRPLAY_FORCE_V1
             bool "Force AirPlay v1 (classic) protocol"
-            default n
+            default y
             help
-                Force the receiver to advertise as an AirPlay v1 (classic)
-                device only. This disables AirPlay 2 features (HomeKit
-                pairing, encrypted transport) but enables DACP remote
-                control — iOS sends DACP-ID and Active-Remote headers in
-                AirPlay v1 mode, allowing hardware buttons to control
-                playback on the source device.
-
-                When disabled (default), the receiver advertises as an
-                AirPlay 2 device. Modern iOS uses the MRP (Media Remote
-                Protocol) for remote control in AirPlay 2 mode, which
-                is not implemented, so hardware play/pause falls back
-                to local mute.
-
-                Note: AirPlay v1 does not support RSA key exchange for
-                audio encryption in this codebase. The receiver will
-                advertise et=0 (no encryption). If iOS refuses to connect,
-                audio encryption support may need to be added.
+                Advertise as a classic AirPlay 1 (RAOP) device. Enables
+                DACP remote control — iOS sends DACP-ID and Active-Remote
+                headers in AirPlay 1 mode, allowing hardware buttons to
+                control playback on the source device.
     endmenu
 
     menu "Button Configuration"

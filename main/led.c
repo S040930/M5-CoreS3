@@ -397,10 +397,12 @@ typedef enum {
 
 static led_state_t s_prev_state = STATE_STANDBY;
 static led_state_t s_current_state = STATE_STANDBY;
+static bool s_error_active = false;
 
 static void apply_state(led_state_t state) {
   s_prev_state = s_current_state;
   s_current_state = state;
+  s_error_active = (state == STATE_ERROR);
 
   switch (state) {
   case STATE_PLAYING:
@@ -556,4 +558,56 @@ void led_set_error(bool error) {
   } else {
     apply_state(s_prev_state);
   }
+}
+
+void led_get_snapshot(led_mode_t *status_mode, led_mode_t *rgb_mode,
+                      bool *error_active, uint8_t *status_brightness) {
+  if (status_mode) {
+#if CONFIG_LED_STATUS_GPIO >= 0
+    *status_mode = s_status_mode;
+#else
+    *status_mode = LED_OFF;
+#endif
+  }
+
+  if (rgb_mode) {
+#if CONFIG_LED_RGB_GPIO >= 0
+    *rgb_mode = s_rgb_mode;
+#else
+    *rgb_mode = LED_OFF;
+#endif
+  }
+
+  if (error_active) {
+    *error_active = s_error_active;
+  }
+
+  if (status_brightness) {
+#if CONFIG_LED_STATUS_GPIO >= 0
+    *status_brightness = s_status_duty;
+#else
+    *status_brightness = 0;
+#endif
+  }
+}
+
+esp_err_t led_set_status_mode(led_mode_t mode) {
+  if (mode < LED_OFF || mode > LED_VU) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  status_led_set_mode(mode);
+  return ESP_OK;
+}
+
+esp_err_t led_set_status_brightness(uint8_t brightness) {
+#if CONFIG_LED_STATUS_GPIO >= 0
+  s_status_duty = brightness;
+  if (s_status_mode == LED_STEADY || s_status_mode == LED_VU) {
+    status_led_set_duty(s_status_duty);
+  }
+  return ESP_OK;
+#else
+  (void)brightness;
+  return ESP_ERR_NOT_SUPPORTED;
+#endif
 }

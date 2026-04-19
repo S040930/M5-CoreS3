@@ -1,0 +1,13 @@
+If:
+  PathMatch: .*
+CompileFlags:
+  Remove:
+    - -mlongcalls
+    - -mdisable-hardware-atomics
+    - -fstrict-volatile-bitfields
+    - -fno-tree-switch-conversion
+  Diagnostic:
+    Ignore:
+      - unknown-argument
+      - drv_unknown_argument
+      - drv_unknown_argument_with_suggestion

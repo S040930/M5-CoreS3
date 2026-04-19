@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Core S3 Console</title>
+<style>
+:root {
+  --bg-0: #0d1317;
+  --bg-1: #162129;
+  --bg-2: #20313b;
+  --ink: #f5f7f6;
+  --muted: #a9bab4;
+  --good: #2cc48b;
+  --warn: #f6b656;
+  --bad: #ef6b5a;
+  --panel: rgba(18, 30, 36, 0.86);
+  --edge: rgba(130, 173, 154, 0.2);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Avenir Next", "Helvetica Neue", "Trebuchet MS", sans-serif;
+  background:
+    radial-gradient(900px 420px at 15% -20%, #2d6952 0%, rgba(45,105,82,0) 70%),
+    radial-gradient(720px 360px at 100% -5%, #5a4f2d 0%, rgba(90,79,45,0) 65%),
+    linear-gradient(160deg, var(--bg-0), var(--bg-1) 55%, var(--bg-2));
+  min-height: 100vh;
+}
+.container {
+  width: min(1060px, 94vw);
+  margin: 20px auto 28px;
+}
+.hero {
+  border: 1px solid var(--edge);
+  background: linear-gradient(140deg, rgba(21, 45, 38, 0.85), rgba(28, 28, 19, 0.82));
+  border-radius: 16px;
+  padding: 18px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+.title { margin: 0; font-size: 28px; letter-spacing: 0.5px; }
+.sub { margin-top: 6px; color: var(--muted); font-size: 13px; }
+.pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 99px;
+  background: var(--warn);
+  box-shadow: 0 0 0 0 rgba(246, 182, 86, 0.7);
+  animation: ping 1.7s infinite;
+}
+.dot.good { background: var(--good); box-shadow: 0 0 0 0 rgba(44, 196, 139, 0.7); }
+@keyframes ping {
+  0% { box-shadow: 0 0 0 0 rgba(246, 182, 86, 0.7); }
+  70% { box-shadow: 0 0 0 10px rgba(246, 182, 86, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(246, 182, 86, 0); }
+}
+.grid {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 12px;
+}
+.card {
+  grid-column: span 12;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  border-radius: 14px;
+  padding: 14px;
+  backdrop-filter: blur(4px);
+}
+@media (min-width: 780px) {
+  .status { grid-column: span 5; }
+  .playback { grid-column: span 7; }
+  .stats { grid-column: span 8; }
+  .led { grid-column: span 4; }
+  .danger { grid-column: span 12; }
+}
+h2 { margin: 0 0 10px; font-size: 16px; }
+.items { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.label { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+.value { font-size: 14px; font-weight: 700; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 9px 13px;
+  color: #111;
+  background: #b7d7c2;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.07); }
+button.sec { background: #89b6c8; }
+button.warn { background: var(--warn); }
+button.bad { background: var(--bad); color: #fff; }
+.range-wrap { margin-top: 10px; }
+input[type="range"] {
+  width: 100%;
+  accent-color: #84e0b5;
+}
+.small { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.banner {
+  margin-top: 10px;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  display: none;
+}
+.banner.ok { display: block; background: rgba(44,196,139,0.2); color: #8de7c2; }
+.banner.err { display: block; background: rgba(239,107,90,0.2); color: #ffc8bf; }
+</style>
+</head>
+<body>
+<div class="container">
+  <section class="hero">
+    <h1 class="title">Core S3 Control Console</h1>
+    <div class="sub">Dedicated panel for playback, volume, LED and health telemetry.</div>
+    <div class="pulse"><span id="conn-dot" class="dot"></span><span id="conn-text">Syncing...</span></div>
+    <div id="msg" class="banner"></div>
+  </section>
+
+  <section class="grid">
+    <article class="card status">
+      <h2>Status</h2>
+      <div class="items">
+        <div><div class="label">Device</div><div id="st-device" class="value">-</div></div>
+        <div><div class="label">Source</div><div id="st-source" class="value">-</div></div>
+        <div><div class="label">Playing</div><div id="st-playing" class="value">-</div></div>
+        <div><div class="label">Network</div><div id="st-net" class="value">-</div></div>
+        <div><div class="label">Free Heap</div><div id="st-heap" class="value">-</div></div>
+        <div><div class="label">Firmware</div><div id="st-fw" class="value">-</div></div>
+      </div>
+    </article>
+
+    <article class="card playback">
+      <h2>Playback + Volume</h2>
+      <div class="btn-row">
+        <button onclick="playPause()">Play/Pause</button>
+        <button class="sec" onclick="volDown()">Vol -</button>
+        <button class="sec" onclick="volUp()">Vol +</button>
+      </div>
+      <div class="range-wrap">
+        <input id="vol" type="range" min="-30" max="0" step="0.5" value="-15">
+        <div class="small">Volume: <span id="vol-label">-15.0 dB</span> (<span id="vol-pct">50</span>%)</div>
+      </div>
+    </article>
+
+    <article class="card stats">
+      <h2>Audio Stats</h2>
+      <div class="items">
+        <div><div class="label">Packets RX</div><div id="as-rx" class="value">-</div></div>
+        <div><div class="label">Decoded</div><div id="as-dec" class="value">-</div></div>
+        <div><div class="label">Dropped</div><div id="as-drop" class="value">-</div></div>
+        <div><div class="label">Decrypt Errors</div><div id="as-decrypt" class="value">-</div></div>
+        <div><div class="label">Underruns</div><div id="as-und" class="value">-</div></div>
+        <div><div class="label">Overruns</div><div id="as-over" class="value">-</div></div>
+        <div><div class="label">Output Latency (us)</div><div id="as-outlat" class="value">-</div></div>
+        <div><div class="label">HW Latency (us)</div><div id="as-hwlat" class="value">-</div></div>
+      </div>
+    </article>
+
+    <article class="card led">
+      <h2>LED</h2>
+      <div class="small">Mode: 0=Off, 1=Steady, 2=Blink Slow, 3=Blink Medium, 4=Blink Fast, 5=VU</div>
+      <div class="btn-row" style="margin-top:8px">
+        <button onclick="setLedMode(1)">Steady</button>
+        <button class="sec" onclick="setLedMode(3)">Blink</button>
+        <button class="warn" onclick="setLedMode(5)">VU</button>
+      </div>
+      <div class="range-wrap">
+        <input id="led-bright" type="range" min="0" max="255" step="1" value="96">
+        <div class="small">Brightness: <span id="led-bright-label">96</span></div>
+      </div>
+      <div class="small">Current status mode: <span id="led-mode">-</span>, error: <span id="led-error">-</span></div>
+    </article>
+
+    <article class="card danger">
+      <h2>System Actions</h2>
+      <div class="btn-row">
+        <button class="warn" onclick="restartNow()">Restart Device</button>
+        <button class="bad" onclick="resetWiFi()">Clear WiFi + Reboot</button>
+        <button class="bad" onclick="resetHap()">Reset AirPlay Pairing + Reboot</button>
+      </div>
+    </article>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let volumeTimer = null;
+let ledTimer = null;
+let authToken = localStorage.getItem('airplayAuthToken') || '';
+
+function notify(text, ok) {
+  const box = $("msg");
+  box.textContent = text;
+  box.className = "banner " + (ok ? "ok" : "err");
+  setTimeout(() => { box.className = "banner"; }, 2400);
+}
+
+async function api(path, options) {
+  options = options || {};
+  options.headers = Object.assign({}, options.headers || {});
+  if (authToken) {
+    options.headers['X-Auth-Token'] = authToken;
+  }
+  const res = await fetch(path, options);
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+async function ensureAuth() {
+  const statusRes = await fetch('/api/auth/status');
+  const status = await statusRes.json();
+  if (status.authenticated) return;
+  if (status.bootstrap_secret && !authToken) {
+    const loginRes = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret: status.bootstrap_secret })
+    });
+    const login = await loginRes.json();
+    if (login.success && login.token) {
+      authToken = login.token;
+      localStorage.setItem('airplayAuthToken', authToken);
+      return;
+    }
+  }
+  throw new Error('HTTP 401');
+}
+
+function setConnected(ok) {
+  $("conn-dot").className = "dot" + (ok ? " good" : "");
+  $("conn-text").textContent = ok ? "Connected" : "Offline";
+}
+
+async function refreshStatus() {
+  const d = await api('/api/core/status');
+  if (!d.success) throw new Error('status failed');
+  const s = d.status;
+  $("st-device").textContent = s.device_name || '-';
+  $("st-source").textContent = s.source || '-';
+  $("st-playing").textContent = s.playing ? 'yes' : 'no';
+  $("st-net").textContent = s.eth_connected ? 'ethernet' : (s.wifi_connected ? 'wifi' : (s.ap_enabled ? 'ap-only' : 'offline'));
+  $("st-heap").textContent = String(s.free_heap || '-');
+  $("st-fw").textContent = s.firmware_version || '-';
+}
+
+async function refreshVolume() {
+  const d = await api('/api/core/volume');
+  if (!d.success) throw new Error('volume failed');
+  $("vol").value = d.volume_db;
+  $("vol-label").textContent = Number(d.volume_db).toFixed(1) + ' dB';
+  $("vol-pct").textContent = Math.round(d.volume_percent);
+}
+
+async function refreshStats() {
+  const d = await api('/api/core/audio/stats');
+  if (!d.success) throw new Error('stats failed');
+  const s = d.stats;
+  $("as-rx").textContent = s.packets_received;
+  $("as-dec").textContent = s.packets_decoded;
+  $("as-drop").textContent = s.packets_dropped;
+  $("as-decrypt").textContent = s.decrypt_errors;
+  $("as-und").textContent = s.buffer_underruns;
+  $("as-over").textContent = s.buffer_overruns;
+  $("as-outlat").textContent = s.output_latency_us;
+  $("as-hwlat").textContent = s.hardware_latency_us;
+}
+
+async function refreshLed() {
+  const d = await api('/api/core/led/state');
+  if (!d.success) throw new Error('led failed');
+  $("led-mode").textContent = d.status_mode;
+  $("led-error").textContent = d.error ? 'yes' : 'no';
+  $("led-bright").value = d.brightness;
+  $("led-bright-label").textContent = d.brightness;
+}
+
+async function playPause() {
+  await api('/api/core/play-pause', { method: 'POST' });
+  notify('Playback command sent', true);
+}
+
+async function volUp() {
+  await api('/api/core/volume/up', { method: 'POST' });
+  setTimeout(refreshVolume, 180);
+}
+
+async function volDown() {
+  await api('/api/core/volume/down', { method: 'POST' });
+  setTimeout(refreshVolume, 180);
+}
+
+async function setVolumeDb(volumeDb) {
+  await api('/api/core/volume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ volume_db: Number(volumeDb) })
+  });
+  $("vol-label").textContent = Number(volumeDb).toFixed(1) + ' dB';
+  $("vol-pct").textContent = Math.round((Number(volumeDb) + 30) / 30 * 100);
+}
+
+async function setLedMode(mode) {
+  await api('/api/core/led', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status_mode: mode })
+  });
+  notify('LED mode updated', true);
+  setTimeout(refreshLed, 150);
+}
+
+async function setLedBrightness(v) {
+  await api('/api/core/led', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ brightness: Number(v) })
+  });
+}
+
+async function restartNow() {
+  if (!confirm('Restart device now?')) return;
+  await api('/api/system/restart', { method: 'POST' });
+  notify('Restarting...', true);
+}
+
+async function resetWiFi() {
+  if (!confirm('Clear saved WiFi credentials and reboot?')) return;
+  await api('/api/wifi/reset', { method: 'POST' });
+}
+
+async function resetHap() {
+  if (!confirm('Clear AirPlay pairing data and reboot?')) return;
+  await api('/api/hap/reset', { method: 'POST' });
+}
+
+async function poll() {
+  try {
+    if (!authToken) {
+      await ensureAuth();
+    }
+    await Promise.all([refreshStatus(), refreshVolume(), refreshStats(), refreshLed()]);
+    setConnected(true);
+  } catch (e) {
+    setConnected(false);
+    console.log(e);
+  }
+}
+
+$("vol").addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $("vol-label").textContent = v.toFixed(1) + ' dB';
+  $("vol-pct").textContent = Math.round((v + 30) / 30 * 100);
+  clearTimeout(volumeTimer);
+  volumeTimer = setTimeout(() => {
+    setVolumeDb(v).catch(() => notify('Volume update failed', false));
+  }, 140);
+});
+
+$("led-bright").addEventListener('input', (e) => {
+  const v = Number(e.target.value);
+  $("led-bright-label").textContent = v;
+  clearTimeout(ledTimer);
+  ledTimer = setTimeout(() => {
+    setLedBrightness(v).catch(() => notify('LED update failed', false));
+  }, 120);
+});
+
+poll();
+setInterval(poll, 1500);
+</script>
+</body>
+</html>

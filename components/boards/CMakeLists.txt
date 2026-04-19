@@ -1,17 +1,25 @@
-# During component requirements scanning, CONFIG_ vars are not yet available.
-# We must declare all possible dependencies upfront.
-set(PRIV_REQUIRES driver nvs_flash esp_driver_i2c esp_driver_spi dac dac_tas57xx dac_tas58xx esp_eth bt main board_utils)
+# CONFIG_ vars may be unavailable during early CMake scans; list all deps once.
+set(PRIV_REQUIRES
+    driver
+    nvs_flash
+    esp_driver_i2c
+    esp_driver_spi
+    dac
+    board_utils
+    esp_codec_dev
+    m5stack_core_s3_noglib
+    esp_lcd
+)
 
 if(CONFIG_BOARD_TARGET_PATH)
     set(boards_dir ${CONFIG_BOARD_TARGET_PATH})
 else()
-    # Requirements scan phase - register with all dirs so headers are found
-    set(boards_dir "squeezeamp")
+    set(boards_dir "m5stack-core-s3")
 endif()
 
 idf_component_register(
     SRC_DIRS "${boards_dir}" "."
     INCLUDE_DIRS "${boards_dir}" "."
-    REQUIRES esp_driver_i2c board_utils
+    REQUIRES esp_driver_i2c board_utils esp_codec_dev m5stack_core_s3_noglib esp_lcd
     PRIV_REQUIRES ${PRIV_REQUIRES}
 )

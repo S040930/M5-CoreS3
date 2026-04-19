@@ -2,6 +2,8 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /**
  * Persistent settings storage (NVS)
@@ -80,6 +82,11 @@ esp_err_t settings_get_wifi_password(char *password, size_t len);
 esp_err_t settings_set_wifi_credentials(const char *ssid, const char *password);
 
 /**
+ * Clear saved WiFi credentials from persistent storage.
+ */
+esp_err_t settings_clear_wifi_credentials(void);
+
+/**
  * Check if WiFi credentials are stored
  * @return true if credentials exist, false otherwise
  */
@@ -98,6 +105,12 @@ esp_err_t settings_get_device_name(char *name, size_t len);
  * @param name Device name
  */
 esp_err_t settings_set_device_name(const char *name);
+
+/**
+ * Get the persistent management secret used for web admin authentication.
+   * Returns a NUL-terminated hex string.
+ */
+esp_err_t settings_get_management_secret(char *secret, size_t len);
 
 // ---- EQ settings ----
 

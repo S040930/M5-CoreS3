@@ -127,10 +127,10 @@ typedef struct {
   uint8_t bytes[EQ_COEFF_BYTES];
 } eq_biquad_t;
 
+#if CONFIG_TAS58XX_EQ_ENABLED
 static const eq_biquad_t
     eq_coeff_table[EQ_NUM_GAIN_STEPS][15] =
-        {
-            /* gain = -15 dB (index 0) */
+        {            /* gain = -15 dB (index 0) */
             {
                 {{0x07, 0xFD, 0x64, 0x04, 0xF0, 0x06, 0x5C,
                   0x84, 0x07, 0xFC, 0x43, 0x0E, 0x0F, 0xF9,
@@ -1619,5 +1619,7 @@ static const eq_biquad_t
                   0xDA, 0x77, 0xFC, 0x47, 0xB4, 0xEE}}, // BQ15 16000.0 Hz Q=0.5
             },
 };
+
+#endif
 
 /* End of generated data */

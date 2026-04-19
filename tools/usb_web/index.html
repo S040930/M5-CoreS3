@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M5CoreS3 USB Control</title>
+<style>
+:root{--bg:#0d1418;--panel:#142127;--line:#2a4048;--text:#e8f3ef;--muted:#93b0ac;--good:#53d29c;--warn:#f0b45b;--bad:#eb6d67;--accent:#6bd0ff}
+*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at top left,rgba(107,208,255,.14),transparent 32%),radial-gradient(circle at bottom right,rgba(83,210,156,.12),transparent 28%),linear-gradient(160deg,#0c1115,#121b20 46%,#0f171b);color:var(--text);min-height:100vh}
+.wrap{max-width:1040px;margin:0 auto;padding:24px}.hero,.card{background:rgba(20,33,39,.86);border:1px solid rgba(148,196,189,.14);border-radius:20px;box-shadow:0 24px 60px rgba(0,0,0,.25);backdrop-filter:blur(14px)}.hero{padding:24px;margin-bottom:18px}.hero h1{margin:0 0 8px;font-size:30px}.hero p{margin:0;color:var(--muted);line-height:1.55}.hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.status-pill{display:inline-flex;align-items:center;gap:10px;margin-top:16px;padding:10px 14px;border-radius:999px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08)}.dot{width:10px;height:10px;border-radius:50%;background:var(--warn)}.dot.good{background:var(--good)}.dot.bad{background:var(--bad)}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}.card{padding:18px;grid-column:span 12}@media(min-width:900px){.status-card{grid-column:span 7}.device-card{grid-column:span 5}.wifi-card{grid-column:span 7}.actions-card{grid-column:span 5}}h2{margin:0 0 14px;font-size:17px}.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.stat{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.05);border-radius:14px;padding:12px}.label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:5px}.value{font-size:14px;font-weight:600;word-break:break-word}.form-group{margin-bottom:14px}label{display:block;margin-bottom:6px;font-size:12px;color:var(--muted)}input{width:100%;padding:12px 13px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:var(--text);font-size:14px}input:focus{outline:none;border-color:rgba(107,208,255,.7)}button{border:0;border-radius:12px;padding:11px 15px;font-size:14px;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}.primary{background:var(--accent);color:#08202b}.secondary{background:#27414b;color:var(--text)}.warning{background:var(--warn);color:#251708}.danger{background:var(--bad);color:white}.btn-row{display:flex;gap:10px;flex-wrap:wrap}.list{max-height:220px;overflow:auto;margin-top:12px}.item{padding:11px 12px;border-radius:12px;margin-bottom:8px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.04);display:flex;justify-content:space-between;gap:12px;cursor:pointer}.item:hover,.item.sel{background:rgba(107,208,255,.12);border-color:rgba(107,208,255,.18)}.msg{margin-top:12px;padding:11px 12px;border-radius:12px;font-size:13px}.msg.good{background:rgba(83,210,156,.14);color:#9ef1ca}.msg.warn{background:rgba(240,180,91,.14);color:#ffd8a2}.msg.bad{background:rgba(235,109,103,.14);color:#ffc4c1}.small{color:var(--muted);font-size:12px;line-height:1.55}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+<section class="hero">
+<h1>M5CoreS3 USB Control</h1>
+<p>Plug in by USB, connect from Chrome or Edge, and manage Wi-Fi, receiver identity, and recovery actions without relying on network access.</p>
+<p class="small" style="margin-top:10px">Before connecting: close PlatformIO / any serial monitor using the same port (only one app can open it). Pick the <span class="mono">usbmodem</span> device for the CoreS3. Use a data-capable USB-C cable.</p>
+<p class="small" style="margin-top:8px"><strong>排查日志（Chrome）</strong>：按 <span class="mono">⌥⌘J</span>（Mac）或 <span class="mono">Ctrl+Shift+J</span>（Windows）打开<strong>开发者工具</strong>，点顶部 <strong>Console</strong>。在地址栏 URL 末尾加 <span class="mono">?debug=1</span> 后回车刷新，再点连接，控制台会打印 <span class="mono">[usb_web]</span> 开头的收发记录。</p>
+<div class="hero-actions">
+<button id="connect-btn" class="primary">Connect Device</button>
+<button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
+<button id="refresh-btn" class="secondary" disabled>Refresh Status</button>
+</div>
+<div class="status-pill"><span id="serial-dot" class="dot"></span><span id="serial-text">USB link idle</span></div>
+<div id="hero-msg"></div>
+</section>
+<section class="grid">
+<article class="card status-card"><h2>Receiver Status</h2><div class="stats">
+<div class="stat"><div class="label">Device</div><div id="st-name" class="value">-</div></div>
+<div class="stat"><div class="label">State</div><div id="st-state" class="value">-</div></div>
+<div class="stat"><div class="label">Network</div><div id="st-net" class="value">-</div></div>
+<div class="stat"><div class="label">IP Address</div><div id="st-ip" class="value mono">-</div></div>
+<div class="stat"><div class="label">Playback</div><div id="st-play" class="value">-</div></div>
+<div class="stat"><div class="label">Codec</div><div id="st-codec" class="value">-</div></div>
+<div class="stat"><div class="label">Track</div><div id="st-track" class="value">-</div></div>
+<div class="stat"><div class="label">Latency / Load</div><div id="st-perf" class="value">-</div></div>
+<div class="stat"><div class="label">Heap</div><div id="st-heap" class="value">-</div></div>
+<div class="stat"><div class="label">Reconnects</div><div id="st-reco" class="value">-</div></div>
+</div></article>
+<article class="card device-card"><h2>Receiver Identity</h2><div class="form-group"><label for="device-name">AirPlay Device Name</label><input id="device-name" type="text" placeholder="Living Room Speaker"></div><div class="btn-row"><button id="save-name-btn" class="primary" disabled>Save Device Name</button></div><div id="name-msg"></div><p class="small" style="margin-top:14px">The name saved here is the same one used for AirPlay discovery and the network-hosted admin page.</p></article>
+<article class="card wifi-card"><h2>Wi-Fi Setup</h2><div class="btn-row"><button id="scan-btn" class="secondary" disabled>Scan Networks</button></div><div id="wifi-list" class="list"></div><div class="form-group"><label for="wifi-ssid">Network Name</label><input id="wifi-ssid" type="text" placeholder="Select or type an SSID"></div><div class="form-group"><label for="wifi-pass">Password</label><input id="wifi-pass" type="password" placeholder="Network password"></div><div class="btn-row"><button id="save-wifi-btn" class="primary" disabled>Save Wi-Fi And Reboot</button></div><div id="wifi-msg"></div></article>
+<article class="card actions-card"><h2>Recovery Actions</h2><div class="btn-row"><button id="restart-btn" class="warning" disabled>Restart Receiver</button><button id="pairing-btn" class="danger" disabled>Reset Pairing</button><button id="wifi-reset-btn" class="danger" disabled>Clear Wi-Fi</button></div><div id="action-msg"></div><p class="small" style="margin-top:14px">USB control is intentionally minimal: no OTA, no diagnostics consoles, and no file management.</p></article>
+</section></div>
+<script>
+const USB_DBG=new URLSearchParams(location.search).has('debug');function usbLog(){if(USB_DBG)console.log('[usb_web]',...arguments);}if(USB_DBG)console.info('[usb_web] Debug on — keep this Console tab open while connecting.');
+const prefix='@usbctl ';let port=null;let reader=null;let writer=null;let pending=new Map();let connected=false;let statusPoll=null;let serialReadLoopPromise=null;
+function setHeroState(text,tone){const dot=document.getElementById('serial-dot');dot.className='dot'+(tone==='good'?' good':tone==='bad'?' bad':'');document.getElementById('serial-text').textContent=text;}
+function setMsg(id,text,tone){const node=document.getElementById(id);if(!node)return;node.innerHTML=text?'<div class="msg '+tone+'">'+text+'</div>':'';}
+function setControls(enabled){['disconnect-btn','refresh-btn','scan-btn','save-wifi-btn','save-name-btn','restart-btn','pairing-btn','wifi-reset-btn'].forEach((id)=>{document.getElementById(id).disabled=!enabled;});}
+function nextId(){return 'req_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);}
+async function sendCommand(cmd,args,timeoutMs=6000){if(!connected||!writer)throw new Error('Not connected');const id=nextId();const payload=JSON.stringify({id,cmd,args:args||{}})+'\n';usbLog('send',cmd,id,payload.trim());const req=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(new Error('Timed out waiting for device response'));},timeoutMs);pending.set(id,{resolve,reject,timer});});await writer.write(new TextEncoder().encode(payload));return req;}
+function sleep(ms){return new Promise((resolve)=>setTimeout(resolve,ms));}
+async function waitForDeviceReady(totalMs=30000){
+  const deadline=Date.now()+totalMs;
+  let lastError=new Error('Timed out waiting for device response');
+  while(Date.now()<deadline&&connected){
+    try{
+      await sendCommand('ping',{},8000);
+      return;
+    }catch(error){
+      lastError=error;
+      await sleep(600);
+    }
+  }
+  throw lastError;
+}
+function resolvePending(message){if(!message.id||!pending.has(message.id))return false;const entry=pending.get(message.id);pending.delete(message.id);clearTimeout(entry.timer);if(message.ok){entry.resolve(message.result||{});}else{entry.reject(new Error(message.error&&message.error.message?message.error.message:'Device command failed'));}return true;}
+function renderStatus(result){const s=result.status||{};const p=result.pipeline||{};document.getElementById('st-name').textContent=s.device_name||'-';document.getElementById('st-state').textContent=s.receiver_state||'-';document.getElementById('st-ip').textContent=s.ip||'-';document.getElementById('st-net').textContent=s.eth_connected?'ethernet':(s.wifi_connected?'wifi':(s.ap_enabled?'ap-only':'offline'));document.getElementById('st-play').textContent=s.playing?'playing':'idle';document.getElementById('st-codec').textContent=p.codec||'-';document.getElementById('st-track').textContent=s.track_title?(s.track_title+(s.track_artist?' / '+s.track_artist:'')):'-';document.getElementById('st-perf').textContent=((p.output_latency_us||0)/1000).toFixed(0)+' ms / '+(p.avg_task_load_pct||0)+'% avg';document.getElementById('st-heap').textContent=Math.round((s.free_heap||0)/1024)+' KB free / '+Math.round((s.min_free_heap||0)/1024)+' KB min';document.getElementById('st-reco').textContent=String(s.reconnect_count||0);document.getElementById('device-name').value=s.device_name||'';}
+function normalizeProtocolLine(line){
+  if(!line)return '';
+  return line.replace(/^[\u0000-\u001f\u007f]+/,'').trimStart();
+}
+function handleProtocolLine(line){
+  const normalized=normalizeProtocolLine(line);
+  const idx=normalized.indexOf(prefix);
+  if(idx<0){if(USB_DBG&&normalized.length>0)usbLog('skip line (no @usbctl)',normalized.slice(0,160));return;}
+  let message;
+  try{message=JSON.parse(normalized.slice(idx+prefix.length));}catch(e){usbLog('JSON parse fail',e.message,normalized.slice(idx,idx+120));return;}
+  usbLog('parsed',message.id,message.ok);
+  if(resolvePending(message))return;
+  if(message.event==='status_changed'&&message.data){renderStatus(message.data);}
+}
+async function pickOrRequestPort(){
+  const granted=await navigator.serial.getPorts();
+  if(granted.length===1){
+    const p=granted[0];
+    if(p.readable||p.writable){
+      try{await p.close();}catch(e){usbLog('pickOrRequestPort pre-close',e&&e.message);}
+      await sleep(150);
+    }
+    return p;
+  }
+  return navigator.serial.requestPort({});
+}
+async function readLoop(onReaderReady){
+  if(!port||!port.readable){
+    usbLog('readLoop: no readable stream');
+    if(typeof onReaderReady==='function'){onReaderReady();}
+    return;
+  }
+  const decoder=new TextDecoder();
+  let buffer='';
+  reader=port.readable.getReader();
+  if(typeof onReaderReady==='function'){onReaderReady();onReaderReady=null;}
+  try{
+    while(connected){
+      const r=await reader.read();
+      if(r.done){usbLog('serial read stream done');break;}
+      buffer+=decoder.decode(r.value,{stream:true});
+      let idx;
+      while((idx=buffer.indexOf('\n'))>=0){
+        const line=buffer.slice(0,idx).replace(/\r$/,'');
+        buffer=buffer.slice(idx+1);
+        handleProtocolLine(line);
+      }
+    }
+  }catch(error){
+    usbLog('read error',error.message);
+    if(connected)setMsg('hero-msg','USB read error: '+error.message,'bad');
+  }finally{
+    try{reader.releaseLock();}catch(e){}
+    reader=null;
+    usbLog('readLoop finished');
+  }
+}
+async function closeSerialFully(showMsg){
+  connected=false;
+  setControls(false);
+  document.getElementById('connect-btn').disabled=false;
+  if(statusPoll){clearInterval(statusPoll);statusPoll=null;}
+  for(const [id,entry] of pending){
+    clearTimeout(entry.timer);
+    entry.reject(new Error('USB connection closed'));
+    pending.delete(id);
+  }
+  try{
+    if(reader){await reader.cancel();}
+  }catch(e){usbLog('reader.cancel',e&&e.message);}
+  if(serialReadLoopPromise){
+    try{await serialReadLoopPromise;}catch(e){usbLog('readLoop await',e&&e.message);}
+    serialReadLoopPromise=null;
+  }
+  try{
+    if(writer){writer.releaseLock();}
+  }catch(e){usbLog('writer.releaseLock',e&&e.message);}
+  writer=null;
+  try{
+    if(port){await port.close();}
+  }catch(e){usbLog('port.close',e&&e.message);}
+  reader=null;
+  port=null;
+  await sleep(150);
+  setHeroState('USB link idle','warn');
+  if(showMsg){setMsg('hero-msg','Disconnected from device.','warn');}
+}
+async function disconnectPort(showMsg){await closeSerialFully(showMsg);}
+async function connectPort(){
+  if(!('serial' in navigator)){setMsg('hero-msg','This page needs Chrome or Edge with Web Serial support.','bad');return;}
+  try{
+    port=await pickOrRequestPort();
+    await sleep(150);
+    try{
+      await port.open({baudRate:115200,bufferSize:4096,flowControl:'none'});
+    }catch(e1){
+      usbLog('open without flowControl fallback',e1&&e1.message);
+      await port.open({baudRate:115200,bufferSize:4096});
+    }
+    try{usbLog('port open ok',port.getInfo?port.getInfo():'n/a');}catch(e){usbLog('port open ok');}
+    writer=port.writable.getWriter();
+    connected=true;
+    setControls(true);
+    document.getElementById('connect-btn').disabled=true;
+    setHeroState('USB connected, waiting for receiver','warn');
+    let readerReadyResolve;
+    const readerReady=new Promise((r)=>{readerReadyResolve=r;});
+    serialReadLoopPromise=readLoop(readerReadyResolve);
+    await readerReady;
+    await sleep(150);
+    await waitForDeviceReady(30000);
+    renderStatus(await sendCommand('get_status',{},8000));
+    setHeroState('USB connected to M5CoreS3','good');
+    setMsg('hero-msg','Connected. You can now manage the receiver over USB.','good');
+    if(statusPoll){clearInterval(statusPoll);}
+    statusPoll=setInterval(refreshStatus,5000);
+  }catch(error){
+    usbLog('connectPort fail',error);
+    setMsg('hero-msg','USB connect failed: '+error.message,'bad');
+    await closeSerialFully(false);
+  }
+}
+function noteRebootMessage(){
+  setMsg('hero-msg','Device is restarting. Wait a few seconds, then click <strong>Connect Device</strong> again. You do not need to restart <span class="mono">server.py</span>.','warn');
+}
+async function refreshStatus(){if(!connected)return;try{renderStatus(await sendCommand('get_status',{},3500));}catch(error){setMsg('hero-msg','Status refresh failed: '+error.message,'bad');}}
+async function scanWiFi(){setMsg('wifi-msg','Scanning nearby networks...','warn');try{const result=await sendCommand('wifi_scan',{},10000);const list=document.getElementById('wifi-list');const networks=result.networks||[];if(!networks.length){list.innerHTML='<div class="msg warn">No networks found.</div>';setMsg('wifi-msg','Scan completed. No networks were returned.','warn');return;}list.innerHTML='';networks.forEach((network)=>{const item=document.createElement('div');item.className='item';item.innerHTML='<span>'+(network.ssid||'(hidden)')+'</span><span>'+network.rssi+' dBm</span>';item.onclick=()=>{document.querySelectorAll('.item').forEach((x)=>x.classList.remove('sel'));item.classList.add('sel');document.getElementById('wifi-ssid').value=network.ssid||'';};list.appendChild(item);});setMsg('wifi-msg','Wi-Fi scan completed.','good');}catch(error){setMsg('wifi-msg','Wi-Fi scan failed: '+error.message,'bad');}}
+async function saveWiFi(){const ssid=document.getElementById('wifi-ssid').value.trim();const password=document.getElementById('wifi-pass').value;if(!ssid){setMsg('wifi-msg','Enter a Wi-Fi network name first.','bad');return;}try{const result=await sendCommand('wifi_config_set',{ssid,password},5000);setMsg('wifi-msg',result.message||'Wi-Fi saved. Device is restarting.','good');setHeroState('Restarting after Wi-Fi update','warn');noteRebootMessage();}catch(error){setMsg('wifi-msg','Failed to save Wi-Fi: '+error.message,'bad');}}
+async function saveName(){const name=document.getElementById('device-name').value.trim();if(!name){setMsg('name-msg','Enter a device name first.','bad');return;}try{await sendCommand('device_name_set',{name},4000);setMsg('name-msg','Device name saved.','good');await refreshStatus();}catch(error){setMsg('name-msg','Failed to save device name: '+error.message,'bad');}}
+async function restartDevice(){if(!confirm('Restart the receiver now?'))return;try{const result=await sendCommand('system_restart',{},4000);setMsg('action-msg',result.message||'Restart scheduled.','good');setHeroState('Restart scheduled','warn');noteRebootMessage();}catch(error){setMsg('action-msg','Restart failed: '+error.message,'bad');}}
+async function resetPairing(){if(!confirm('Reset AirPlay pairing and reboot?'))return;try{const result=await sendCommand('airplay_reset_pairing',{},4000);setMsg('action-msg',result.message||'Pairing reset. Restarting.','good');setHeroState('Restarting after pairing reset','warn');noteRebootMessage();}catch(error){setMsg('action-msg','Pairing reset failed: '+error.message,'bad');}}
+async function clearWiFi(){if(!confirm('Clear saved Wi-Fi credentials and reboot into setup mode?'))return;try{const result=await sendCommand('wifi_reset',{},4000);setMsg('action-msg',result.message||'Wi-Fi cleared. Restarting.','good');setHeroState('Restarting after Wi-Fi reset','warn');noteRebootMessage();}catch(error){setMsg('action-msg','Wi-Fi reset failed: '+error.message,'bad');}}
+document.getElementById('connect-btn').addEventListener('click',connectPort);document.getElementById('disconnect-btn').addEventListener('click',()=>disconnectPort());document.getElementById('refresh-btn').addEventListener('click',refreshStatus);document.getElementById('scan-btn').addEventListener('click',scanWiFi);document.getElementById('save-wifi-btn').addEventListener('click',saveWiFi);document.getElementById('save-name-btn').addEventListener('click',saveName);document.getElementById('restart-btn').addEventListener('click',restartDevice);document.getElementById('pairing-btn').addEventListener('click',resetPairing);document.getElementById('wifi-reset-btn').addEventListener('click',clearWiFi);
+if('serial' in navigator&&navigator.serial.addEventListener){
+  navigator.serial.addEventListener('disconnect',async()=>{
+    if(connected){setMsg('hero-msg','USB disconnected. You can click Connect again after the cable or device settles.','warn');await closeSerialFully(false);}
+  });
+  navigator.serial.addEventListener('connect',()=>{
+    setMsg('hero-msg','USB serial device detected — click <strong>Connect Device</strong> when ready.','good');
+  });
+}
+</script>
+</body>
+</html>

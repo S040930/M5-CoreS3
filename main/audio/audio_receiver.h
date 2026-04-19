@@ -75,6 +75,11 @@ void audio_receiver_set_format(const audio_format_t *format);
 void audio_receiver_set_encryption(const audio_encrypt_t *encrypt);
 
 /**
+ * Clear active encryption state for both realtime and buffered streams.
+ */
+void audio_receiver_clear_encryption(void);
+
+/**
  * Start receiving audio on specified port
  */
 esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port);
@@ -94,6 +99,8 @@ void audio_receiver_stop(void);
  * Get audio statistics
  */
 void audio_receiver_get_stats(audio_stats_t *stats);
+uint32_t audio_receiver_get_buffered_frames(void);
+void audio_receiver_get_active_codec(char *codec, size_t len);
 
 /**
  * Read decoded PCM samples from buffer
@@ -228,3 +235,14 @@ void audio_receiver_stop_buffered_only(void);
  * Set the stream type (realtime vs buffered)
  */
 void audio_receiver_set_stream_type(audio_stream_type_t type);
+audio_stream_type_t audio_receiver_get_stream_type(void);
+
+/**
+ * Force timing to start playback immediately (fallback when anchor unavailable)
+ */
+void audio_timing_force_start(void);
+
+/**
+ * Query if timing anchor is valid
+ */
+bool audio_receiver_anchor_valid(void);

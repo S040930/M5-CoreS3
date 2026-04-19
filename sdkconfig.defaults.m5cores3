@@ -1,0 +1,42 @@
+# M5Stack CoreS3 target defaults
+CONFIG_BOARD_M5STACK_CORES3=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESPTOOLPY_MONITOR_BAUD=115200
+CONFIG_SPIRAM_MODE_QUAD=y
+# CONFIG_SPIRAM_MODE_OCT is not set
+
+# Route the primary console to the built-in USB serial/JTAG port so startup
+# logs are visible without an external UART adapter.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+# CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG is not set
+
+# Board peripherals
+CONFIG_BAT_CHANNEL=7
+CONFIG_LED_RGB_GPIO=48
+CONFIG_I2S_SCK_IO=-1
+CONFIG_I2S_BCK_IO=-1
+CONFIG_I2S_WS_IO=-1
+CONFIG_I2S_DO_IO=-1
+CONFIG_I2S_GND_IO=-1
+CONFIG_I2S_VCC_IO=-1
+
+# Keep the first release focused on audio playback
+CONFIG_DISPLAY_ENABLED=n
+
+# iPhone / modern hotspots may use WPA3; STA must negotiate SAE when offered
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
+
+# Wi‑Fi + esp_netif default handlers on sys_evt need more than default 2304 bytes
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# Default home Wi-Fi seeding is disabled for public/shared builds.
+# If you need local factory seeding, override in a private sdkconfig.user.* file.
+# CONFIG_WIFI_FACTORY_DEFAULT_ENABLE is not set
+CONFIG_WIFI_FACTORY_SSID=""
+CONFIG_WIFI_FACTORY_PASSWORD=""
+
+# AirPlay 1 (classic RAOP) mode — forced unconditionally
+CONFIG_AIRPLAY_FORCE_V1=y

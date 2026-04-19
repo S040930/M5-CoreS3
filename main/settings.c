@@ -2,6 +2,8 @@
 
 #include "dac.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
+#include "esp_random.h"
 #include "nvs.h"
 #include <string.h>
 
@@ -16,10 +18,13 @@ static const char *TAG = "settings";
 #define NVS_KEY_WIFI_PASSWORD "wifi_pass"
 #define NVS_KEY_DEVICE_NAME   "device_name"
 #define NVS_KEY_EQ_GAINS      "eq_gains"
+#define NVS_KEY_WEB_SECRET    "web_secret"
 
 #define MAX_WIFI_SSID_LEN     32
 #define MAX_WIFI_PASSWORD_LEN 64
 #define MAX_DEVICE_NAME_LEN   64
+#define MANAGEMENT_SECRET_BYTES 16
+#define MANAGEMENT_SECRET_LEN   (MANAGEMENT_SECRET_BYTES * 2)
 
 // Cached values  (defaults = 50 %)
 static float g_volume_db = -15.0f;
@@ -32,6 +37,45 @@ static bool g_bt_volume_loaded = false;
 
 static float g_eq_gains[SETTINGS_EQ_BANDS];
 static bool g_eq_loaded = false;
+static char g_management_secret[MANAGEMENT_SECRET_LEN + 1];
+
+static void bytes_to_hex(const uint8_t *bytes, size_t byte_len, char *out,
+                         size_t out_len) {
+  static const char hex[] = "0123456789abcdef";
+  size_t needed = byte_len * 2 + 1;
+  if (!bytes || !out || out_len < needed) {
+    return;
+  }
+
+  for (size_t i = 0; i < byte_len; i++) {
+    out[i * 2] = hex[bytes[i] >> 4];
+    out[i * 2 + 1] = hex[bytes[i] & 0x0F];
+  }
+  out[byte_len * 2] = '\0';
+}
+
+static esp_err_t ensure_management_secret(nvs_handle_t nvs) {
+  size_t secret_len = sizeof(g_management_secret);
+  esp_err_t err =
+      nvs_get_str(nvs, NVS_KEY_WEB_SECRET, g_management_secret, &secret_len);
+  if (err == ESP_OK && secret_len == sizeof(g_management_secret)) {
+    return ESP_OK;
+  }
+
+  uint8_t random_bytes[MANAGEMENT_SECRET_BYTES];
+  esp_fill_random(random_bytes, sizeof(random_bytes));
+  bytes_to_hex(random_bytes, sizeof(random_bytes), g_management_secret,
+               sizeof(g_management_secret));
+
+  err = nvs_set_str(nvs, NVS_KEY_WEB_SECRET, g_management_secret);
+  if (err == ESP_OK) {
+    err = nvs_commit(nvs);
+  }
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "Generated persistent web management secret");
+  }
+  return err;
+}
 
 esp_err_t settings_init(void) {
   // Load volume on init
@@ -56,6 +100,33 @@ esp_err_t settings_init(void) {
 
     nvs_close(nvs);
   }
+
+  err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err == ESP_OK) {
+    err = ensure_management_secret(nvs);
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to initialize web management secret: %s",
+               esp_err_to_name(err));
+      return err;
+    }
+  } else {
+    ESP_LOGE(TAG, "Failed to open NVS for management secret: %s",
+             esp_err_to_name(err));
+    return err;
+  }
+
+#if CONFIG_WIFI_FACTORY_DEFAULT_ENABLE
+  if (strlen(CONFIG_WIFI_FACTORY_SSID) > 0 && !settings_has_wifi_credentials()) {
+    esp_err_t werr = settings_set_wifi_credentials(CONFIG_WIFI_FACTORY_SSID,
+                                                 CONFIG_WIFI_FACTORY_PASSWORD);
+    if (werr == ESP_OK) {
+      ESP_LOGI(TAG, "Seeded factory WiFi from Kconfig (first boot / empty NVS)");
+    } else {
+      ESP_LOGW(TAG, "Factory WiFi seed failed: %s", esp_err_to_name(werr));
+    }
+  }
+#endif
 
   return ESP_OK;
 }
@@ -253,6 +324,43 @@ esp_err_t settings_set_wifi_credentials(const char *ssid,
   return err;
 }
 
+esp_err_t settings_clear_wifi_credentials(void) {
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  esp_err_t erase_ssid_err = nvs_erase_key(nvs, NVS_KEY_WIFI_SSID);
+  if (erase_ssid_err != ESP_OK && erase_ssid_err != ESP_ERR_NVS_NOT_FOUND) {
+    nvs_close(nvs);
+    ESP_LOGE(TAG, "Failed to erase WiFi SSID: %s",
+             esp_err_to_name(erase_ssid_err));
+    return erase_ssid_err;
+  }
+
+  esp_err_t erase_pass_err = nvs_erase_key(nvs, NVS_KEY_WIFI_PASSWORD);
+  if (erase_pass_err != ESP_OK && erase_pass_err != ESP_ERR_NVS_NOT_FOUND) {
+    nvs_close(nvs);
+    ESP_LOGE(TAG, "Failed to erase WiFi password: %s",
+             esp_err_to_name(erase_pass_err));
+    return erase_pass_err;
+  }
+
+  err = nvs_commit(nvs);
+  nvs_close(nvs);
+
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "Cleared saved WiFi credentials");
+  } else {
+    ESP_LOGE(TAG, "Failed to clear WiFi credentials: %s",
+             esp_err_to_name(err));
+  }
+
+  return err;
+}
+
 bool settings_has_wifi_credentials(void) {
   char ssid[MAX_WIFI_SSID_LEN + 1];
   return settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK;
@@ -307,6 +415,14 @@ esp_err_t settings_set_device_name(const char *name) {
   }
 
   return err;
+}
+
+esp_err_t settings_get_management_secret(char *secret, size_t len) {
+  if (!secret || len < sizeof(g_management_secret)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  memcpy(secret, g_management_secret, sizeof(g_management_secret));
+  return ESP_OK;
 }
 
 /* ================================================================== */

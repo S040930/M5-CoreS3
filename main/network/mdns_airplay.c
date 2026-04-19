@@ -1,10 +1,10 @@
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_err.h"
 #include "mdns.h"
 #include <stdio.h>
 #include <string.h>
 
-#include "hap.h"
 #include "mdns_airplay.h"
 #include "rtsp_handlers.h"
 #include "wifi.h"
@@ -14,12 +14,7 @@ static const char *TAG = "mdns_airplay";
 
 // Feature flags are defined in rtsp_handlers.h (shared with /info handler)
 
-// Protocol version
-#ifdef CONFIG_AIRPLAY_FORCE_V1
 #define AIRPLAY_PROTOCOL_VERSION "1"
-#else
-#define AIRPLAY_PROTOCOL_VERSION "2"
-#endif
 #define AIRPLAY_SOURCE_VERSION "377.40.00"
 
 // Flags: 0x4 = audio receiver
@@ -29,107 +24,96 @@ static const char *TAG = "mdns_airplay";
 // AppleTV3,2 = Apple TV, AudioAccessory5,1 = HomePod mini (speaker)
 #define AIRPLAY_MODEL "AudioAccessory5,1"
 
-void mdns_airplay_init(void) {
+static void build_mdns_hostname(const char *device_name, char *hostname,
+                                size_t hostname_len) {
+  if (!hostname || hostname_len == 0) {
+    return;
+  }
+
+  size_t out = 0;
+  bool last_was_dash = false;
+
+  for (size_t i = 0; device_name && device_name[i] != '\0' &&
+                     out + 1 < hostname_len;
+       i++) {
+    unsigned char ch = (unsigned char)device_name[i];
+    if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+      hostname[out++] = (char)ch;
+      last_was_dash = false;
+    } else if (ch >= 'A' && ch <= 'Z') {
+      hostname[out++] = (char)(ch - 'A' + 'a');
+      last_was_dash = false;
+    } else if (!last_was_dash && out > 0) {
+      hostname[out++] = '-';
+      last_was_dash = true;
+    }
+  }
+
+  while (out > 0 && hostname[out - 1] == '-') {
+    out--;
+  }
+
+  if (out == 0) {
+    strncpy(hostname, "esp32-airplay", hostname_len - 1);
+    hostname[hostname_len - 1] = '\0';
+    return;
+  }
+
+  hostname[out] = '\0';
+}
+
+esp_err_t mdns_airplay_init(void) {
   char mac_str[18];
   char device_id[18];
-  char features_str[32];
   char service_name[80];
-  char pk_str[65]; // 32 bytes = 64 hex chars + null
   char device_name[65];
+  char hostname[65];
 
-  // Get device name from settings
+  // Get device name and MAC
   settings_get_device_name(device_name, sizeof(device_name));
-
-  // Get MAC address
+  build_mdns_hostname(device_name, hostname, sizeof(hostname));
   wifi_get_mac_str(mac_str, sizeof(mac_str));
   strncpy(device_id, mac_str, sizeof(device_id));
 
-  // Get real Ed25519 public key from HAP module
-  const uint8_t *pk = hap_get_public_key();
-  for (int i = 0; i < 32; i++) {
-    snprintf(pk_str + (size_t)i * 2, 3, "%02x", pk[i]);
-  }
-
-  // Format features as "hi,lo" hex string
-  snprintf(features_str, sizeof(features_str), "0x%X,0x%X", AIRPLAY_FEATURES_LO,
-           AIRPLAY_FEATURES_HI);
-
-  // Create service name for RAOP: <mac>@<name>
+  // Service name format: <MAC>@<DeviceName>
   uint8_t mac[6];
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
   snprintf(service_name, sizeof(service_name), "%02X%02X%02X%02X%02X%02X@%s",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], device_name);
 
   // Initialize mDNS
-  ESP_ERROR_CHECK(mdns_init());
-
-  // Set hostname
-  ESP_ERROR_CHECK(mdns_hostname_set(device_name));
-
-#ifndef CONFIG_AIRPLAY_FORCE_V1
-  // ========================================
-  // _airplay._tcp service (port 7000)
-  // Only registered for AirPlay 2 mode
-  // ========================================
-  mdns_txt_item_t airplay_txt[] = {
-      {"deviceid", device_id},
-      {"features", features_str},
-      {"flags", AIRPLAY_FLAGS},
-      {"model", AIRPLAY_MODEL},
-      {"pk", pk_str},
-      {"pi", "00000000-0000-0000-0000-000000000000"}, // Pairing identity UUID
-      {"srcvers", AIRPLAY_SOURCE_VERSION},
-      {"vv", AIRPLAY_PROTOCOL_VERSION},
-      {"acl", "0"},
-  };
-
-  esp_err_t err =
-      mdns_service_add(device_name, "_airplay", "_tcp", 7000, airplay_txt,
-                       sizeof(airplay_txt) / sizeof(airplay_txt[0]));
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to add _airplay._tcp service: %s",
-             esp_err_to_name(err));
+  esp_err_t err = mdns_init();
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    ESP_LOGE(TAG, "mDNS init failed: %s", esp_err_to_name(err));
+    return err;
   }
-#endif
+
+  ESP_LOGI(TAG, "mDNS hostname: %s (device name: %s)", hostname, device_name);
+  err = mdns_hostname_set(hostname);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set mDNS hostname: %s", esp_err_to_name(err));
+    return err;
+  }
 
   // ========================================
   // _raop._tcp service (port 7000)
-  // RAOP = Remote Audio Output Protocol
-  // Service name format: <MAC>@<DeviceName>
+  // Classic AirPlay 1 (RAOP) advertisement
   // ========================================
-#ifdef CONFIG_AIRPLAY_FORCE_V1
-  // AirPlay v1 (classic RAOP): match squeezelite-esp32 txt record format.
-  // No features, no pk, no HAP pairing — just classic RAOP fields.
-  mdns_txt_item_t raop_txt[] = {
-      {"am", AIRPLAY_MODEL}, {"tp", "UDP"}, // Transport protocol
-      {"sm", "false"},                      // Sharing mode
-      {"sv", "false"},                      // Server version (unused)
-      {"ek", "1"},                          // Encryption key available
-      {"et", "0,1"},                        // Encryption types: none, RSA
-      {"md", "0,1,2"},                      // Metadata types
-      {"cn", "0,1"},                        // Audio codecs: PCM, ALAC
-      {"ch", "2"},                          // Channels
-      {"ss", "16"},                         // Sample size (bits)
-      {"sr", "44100"},                      // Sample rate
-      {"vn", "3"},                          // Version number
-      {"txtvers", "1"},                     // TXT record version
-  };
-#else
   mdns_txt_item_t raop_txt[] = {
       {"am", AIRPLAY_MODEL},
-      {"cn", "0,1,2,3"},     // Audio codecs: PCM, ALAC, AAC, AAC-ELD
-      {"da", "true"},        // Digest auth
-      {"et", "0,3,5"},       // Encryption types
-      {"ft", features_str},  // Features (same as airplay)
-      {"md", "0,1,2"},       // Metadata types
-      {"pk", pk_str},        // Public key
-      {"sf", AIRPLAY_FLAGS}, // Status flags
-      {"tp", "UDP"},         // Transport protocol
-      {"vn", "65537"},       // Version number
-      {"vs", AIRPLAY_SOURCE_VERSION},
-      {"vv", AIRPLAY_PROTOCOL_VERSION},
+      {"tp", "UDP"},      // Transport protocol
+      {"sm", "false"},    // Sharing mode
+      {"sv", "false"},    // Server version (unused)
+      {"ek", "1"},        // Encryption key available
+      {"et", "0,1"},      // Encryption types: none, RSA
+      {"md", "0,1,2"},    // Metadata types
+      {"cn", "0,1"},      // Audio codecs: PCM, ALAC
+      {"ch", "2"},        // Channels
+      {"ss", "16"},       // Sample size (bits)
+      {"sr", "44100"},    // Sample rate
+      {"vn", "3"},        // Version number
+      {"txtvers", "1"},   // TXT record version
   };
-#endif
 
   esp_err_t err_raop =
       mdns_service_add(service_name, "_raop", "_tcp", 7000, raop_txt,
@@ -138,4 +122,5 @@ void mdns_airplay_init(void) {
     ESP_LOGE(TAG, "Failed to add _raop._tcp service: %s",
              esp_err_to_name(err_raop));
   }
+  return err_raop;
 }

@@ -60,40 +60,54 @@ static void dns_server_task(void *pvParameters) {
     // Set response flags: QR=1 (response), AA=1 (authoritative), RCODE=0 (no
     // error)
     resp_header->flags = htons(0x8400);
-    resp_header->ancount = req_header->qdcount; // Answer count = question count
 
     int resp_len = len;
+    uint16_t actual_ancount = 0;
 
     // Add answer section for each question
     uint16_t qdcount = ntohs(req_header->qdcount);
     uint8_t *ptr = rx_buffer + sizeof(dns_header_t);
 
     for (int i = 0; i < qdcount && resp_len < DNS_MAX_LEN - 16; i++) {
+      uint16_t qname_offset = ptr - rx_buffer;
+
       // Skip question name
       while (*ptr != 0 && ptr < rx_buffer + len) {
         ptr += *ptr + 1;
       }
-      ptr++;    // Skip null terminator
+      ptr++; // Skip null terminator
+
+      if (ptr + 4 > rx_buffer + len) {
+        break;
+      }
+
+      uint16_t qtype = (ptr[0] << 8) | ptr[1];
       ptr += 4; // Skip QTYPE and QCLASS
 
-      // Add answer: pointer to question name, type A, class IN, TTL, IP
-      uint8_t *ans = tx_buffer + resp_len;
-      ans[0] = 0xC0; // Pointer to offset 12 (question name)
-      ans[1] = 0x0C;
-      ans[2] = 0x00; // Type A
-      ans[3] = 0x01;
-      ans[4] = 0x00; // Class IN
-      ans[5] = 0x01;
-      ans[6] = 0x00; // TTL (60 seconds)
-      ans[7] = 0x00;
-      ans[8] = 0x00;
-      ans[9] = 0x3C;
-      ans[10] = 0x00; // RDLENGTH (4 bytes for IPv4)
-      ans[11] = 0x04;
-      // IP address (already in network byte order)
-      memcpy(&ans[12], &s_redirect_ip, 4);
-      resp_len += 16;
+      // Only respond to A (1) or ANY (255) queries
+      if (qtype == 1 || qtype == 255) {
+        // Add answer: pointer to question name, type A, class IN, TTL, IP
+        uint8_t *ans = tx_buffer + resp_len;
+        ans[0] = 0xC0 | (qname_offset >> 8);
+        ans[1] = qname_offset & 0xFF;
+        ans[2] = 0x00; // Type A
+        ans[3] = 0x01;
+        ans[4] = 0x00; // Class IN
+        ans[5] = 0x01;
+        ans[6] = 0x00; // TTL (60 seconds)
+        ans[7] = 0x00;
+        ans[8] = 0x00;
+        ans[9] = 0x3C;
+        ans[10] = 0x00; // RDLENGTH (4 bytes for IPv4)
+        ans[11] = 0x04;
+        // IP address (already in network byte order)
+        memcpy(&ans[12], &s_redirect_ip, 4);
+        resp_len += 16;
+        actual_ancount++;
+      }
     }
+
+    resp_header->ancount = htons(actual_ancount);
 
     sendto(s_dns_socket, tx_buffer, resp_len, 0,
            (struct sockaddr *)&client_addr, addr_len);

@@ -1,13 +1,254 @@
-.cache/
-.claude/
-.pio/
-.venv/
-.vscode/
-build*
-managed_components/
-sdkconfig
-sdkconfig.*
-!sdkconfig.defaults.*
+################################################################################
+# M5 Core S3 AirPlay v1 — Git Ignore Rules
+# 
+# This file ensures only source code, configuration, and documentation are
+# tracked. Build artifacts, IDE settings, and dependencies (managed via
+# package managers) are excluded.
+################################################################################
 
-#
+# ============================================================================
+# Build System & Artifacts
+# ============================================================================
+
+# PlatformIO build artifacts and cache
+.pio/
+.platformio/
+build*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# CMake build artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# ESP-IDF build output
+sdkconfig           # Generated runtime configuration (do NOT commit)
+sdkconfig.old       # Previous runtime config backup
+
+# Temporary compilation files
+*.d
+*.s
+*.i
+
+# ============================================================================
+# IDE & Editor Settings (User-specific, should not be tracked)
+# ============================================================================
+
+# VS Code workspace
+.vscode/
+.vscode/settings.json
+.vscode/extensions.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim/Neovim
+.vim/
+.netrwhist
+*~
+*.swp
+*.swo
+
+# Visual Studio
+.vs/
+.vsconfig
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# ============================================================================
+# Python & Virtual Environments
+# ============================================================================
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ============================================================================
+# Operating System Artifacts
+# ============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+*.lnk
+$RECYCLE.BIN/
+
+# Linux
+.directory
+
+# ============================================================================
+# Cache & Temporary Files
+# ============================================================================
+
+# IDE and tool caches
+.cache/
+.claude/           # Claude AI assistant cache
+.clangd/           # Clangd LSP cache
+
+# Build wrappers cache
+.gradle/
+dist/
+
+# ============================================================================
+# Dependency Management (Auto-Managed Components)
+# ============================================================================
+
+# ESP-IDF managed components (auto-downloaded, do NOT track)
+# These are automatically managed by `idf.py update-dependencies`
+managed_components/
+dependencies.lock.new
+
+# ============================================================================
+# Project-Specific Configurations (User Customizations)
+# ============================================================================
+
+# User-specific PlatformIO environment overrides
 user_platformio.ini
+user_*.ini
+
+# User-specific sdkconfig overrides
+sdkconfig.user
+sdkconfig.*.user
+
+# Local test files or temporary data
+.local/
+tmp/
+temp/
+
+# ============================================================================
+# Generated Build/Configuration Files
+# ============================================================================
+
+# Configuration files generated at build time
+# (Only commit base sdkconfig.defaults.* files)
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*
+!sdkconfig.m5cores3
+!sdkconfig.esp32s3
+!sdkconfig.squeezeamp
+
+# Generated documentation
+/docs/generated/
+/docs/_build/
+doxygen_output/
+
+# Binary firmware files (can be regenerated from source)
+*.bin
+*.elf
+*.hex
+*.uf2
+
+# ============================================================================
+# Debug & Logging
+# ============================================================================
+
+# Debug output and logs
+*.log
+logs/
+debug_output/
+
+# GDB/LLDB debug scripts
+.gdb_history
+.lldb_history
+
+# Trace files
+*.trace
+*.vcd
+
+# ============================================================================
+# CI/CD & Automation
+# ============================================================================
+
+# Local CI runner caches
+.github/workflows/_temp/
+.circleci/cache/
+
+# Build server artifacts
+*.log.zip
+build-report/
+
+# ============================================================================
+# Secrets & Credentials (CRITICAL!)
+# ============================================================================
+
+# Never commit secrets, keys, or credentials
+.env
+.env.local
+.env.*.local
+secrets/
+credentials/
+*.pem
+*.key
+*.pfx
+*.p12
+
+# WiFi configuration (if contains real credentials)
+wifi_config.h
+network_secrets.h
+
+# API keys and tokens
+config_local.h
+api_keys.h
+
+# ============================================================================
+# IDE Generated Files
+# ============================================================================
+
+# Clangd and tags
+compile_commands.json
+.tags
+.tags_sorted_by_file
+.ctags
+cscope.out
+
+# ============================================================================
+# Miscellaneous
+# ============================================================================
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Compressed archives
+*.zip
+*.tar.gz
+*.rar
+
+# Cleanup/maintenance reports
+cleanup_reports/

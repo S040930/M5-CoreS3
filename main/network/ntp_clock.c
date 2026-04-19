@@ -13,6 +13,9 @@
 
 static const char *TAG = "ntp_clock";
 
+#define NTP_EPOCH_OFFSET_SECONDS 2208988800ULL
+#define MAX_SANE_OFFSET_NS       5000000000LL
+
 // Timing packet types (from shairport-sync)
 #define TIMING_REQUEST  0xD2
 #define TIMING_RESPONSE 0xD3
@@ -47,21 +50,13 @@ static struct {
 
   // Clock offset tracking
   bool locked;
+  bool sane_offset;
   int64_t offset_ns; // Current best offset
   int64_t measurements[TIMING_HISTORY_SIZE];
   int64_t dispersions[TIMING_HISTORY_SIZE];
   int measurement_count;
   int measurement_index;
 } ntp = {0};
-
-// Convert local time (microseconds) to NTP timestamp format (for packet)
-static uint64_t local_us_to_ntp(int64_t local_us) {
-  // NTP timestamp: upper 32 bits = seconds, lower 32 bits = fraction
-  uint32_t secs = (uint32_t)(local_us / 1000000);
-  uint64_t frac_us = local_us % 1000000;
-  uint32_t frac = (uint32_t)((frac_us << 32) / 1000000);
-  return ((uint64_t)secs << 32) | frac;
-}
 
 // Convert NTP timestamp from packet to nanoseconds
 static int64_t ntp_to_ns(uint32_t secs, uint32_t frac) {
@@ -70,12 +65,32 @@ static int64_t ntp_to_ns(uint32_t secs, uint32_t frac) {
   return ns;
 }
 
+// Convert local time (microseconds) to NTP timestamp format (for packet)
+static uint64_t local_us_to_ntp(int64_t local_us) {
+  local_us += (int64_t)NTP_EPOCH_OFFSET_SECONDS * 1000000LL;
+  // NTP timestamp: upper 32 bits = seconds, lower 32 bits = fraction
+  uint32_t secs = (uint32_t)(local_us / 1000000);
+  uint64_t frac_us = local_us % 1000000;
+  uint32_t frac = (uint32_t)((frac_us << 32) / 1000000);
+  return ((uint64_t)secs << 32) | frac;
+}
+
+// Same NTP timescale as departure (origin) from local_us_to_ntp — required
+// for offset/RTT; mixing esp_timer ns + raw epoch caused ~41146 s bogus offset.
+static int64_t local_us_to_absolute_ntp_ns(int64_t local_us) {
+  uint64_t ntp = local_us_to_ntp(local_us);
+  uint32_t secs = (uint32_t)(ntp >> 32);
+  uint32_t frac = (uint32_t)(ntp & 0xFFFFFFFF);
+  return ntp_to_ns(secs, frac);
+}
+
 // Process timing response and calculate offset
-static void process_timing_response(const uint8_t *packet, size_t len,
-                                    int64_t arrival_ns) {
+static void process_timing_response(const uint8_t *packet, size_t len) {
   if (len < sizeof(timing_packet_t)) {
     return;
   }
+
+  int64_t arrival_ns = local_us_to_absolute_ntp_ns(esp_timer_get_time());
 
   // Extract timestamps from response
   // Origin: our original transmit time (echoed back)
@@ -121,6 +136,14 @@ static void process_timing_response(const uint8_t *packet, size_t len,
     return;
   }
 
+  bool sane_offset = llabs(offset_ns) <= MAX_SANE_OFFSET_NS;
+  if (!sane_offset) {
+    ESP_LOGW(TAG, "Rejecting timing offset outside sane range: %lld ms",
+             (long long)(offset_ns / 1000000LL));
+    ntp.sane_offset = false;
+    return;
+  }
+
   // Store measurement
   int idx = ntp.measurement_index;
   ntp.measurements[idx] = offset_ns;
@@ -141,6 +164,7 @@ static void process_timing_response(const uint8_t *packet, size_t len,
   }
 
   ntp.offset_ns = best_offset;
+  ntp.sane_offset = true;
 
   // Consider locked after enough measurements
   if (!ntp.locked && ntp.measurement_count >= MIN_MEASUREMENTS) {
@@ -214,11 +238,10 @@ static void ntp_task(void *pvParameters) {
     }
 
     if (len >= 2) {
-      int64_t arrival_ns = esp_timer_get_time() * 1000LL;
       uint8_t pkt_type = packet[1];
 
       if (pkt_type == TIMING_RESPONSE) {
-        process_timing_response(packet, len, arrival_ns);
+        process_timing_response(packet, len);
       }
     }
   }
@@ -256,6 +279,7 @@ esp_err_t ntp_clock_start_client(uint32_t remote_ip, uint16_t remote_port) {
 
   // Reset state
   ntp.locked = false;
+  ntp.sane_offset = false;
   ntp.offset_ns = 0;
   ntp.measurement_count = 0;
   ntp.measurement_index = 0;
@@ -300,12 +324,17 @@ void ntp_clock_stop(void) {
   }
 
   ntp.locked = false;
+  ntp.sane_offset = false;
   ntp.measurement_count = 0;
   ESP_LOGI(TAG, "NTP timing stopped");
 }
 
 bool ntp_clock_is_locked(void) {
   return ntp.locked;
+}
+
+bool ntp_clock_has_sane_offset(void) {
+  return ntp.sane_offset;
 }
 
 int64_t ntp_clock_get_offset_ns(void) {

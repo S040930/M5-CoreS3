@@ -26,6 +26,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0d1117;color:#c9
 <div id='log'><div id='anchor'></div></div>
 <script>
 var log=document.getElementById('log'),dot=document.getElementById('dot'),anchor=document.getElementById('anchor'),autoScroll=true,maxLines=2000;
+var authToken=localStorage.getItem('airplayAuthToken')||'';
 function toggle_scroll(){autoScroll=!autoScroll;document.getElementById('scroll-btn').textContent='Auto-scroll: '+(autoScroll?'ON':'OFF');}
 function clear_log(){log.innerHTML='';anchor=document.createElement('div');anchor.id='anchor';log.appendChild(anchor);}
 var ansiRe=/\x1b\[([0-9;]*)m/g;
@@ -69,8 +70,24 @@ function colorize(text){
   while(log.childNodes.length>maxLines+1)log.removeChild(log.firstChild);
   if(autoScroll)anchor.scrollIntoView();
 }
-function connect(){
-  var ws=new WebSocket('ws://'+location.host+'/ws/logs');
+async function ensureAuth(){
+  var r=await fetch('/api/auth/status');var d=await r.json();
+  if(d.authenticated)return true;
+  if(d.bootstrap_secret&&!authToken){
+    var lr=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({secret:d.bootstrap_secret})});
+    var ld=await lr.json();
+    if(ld.success&&ld.token){
+      authToken=ld.token;
+      localStorage.setItem('airplayAuthToken',authToken);
+      return true;
+    }
+  }
+  return false;
+}
+async function connect(){
+  if(!authToken){var ok=await ensureAuth();if(!ok){setTimeout(connect,2000);return;}}
+  var proto=location.protocol==='https:'?'wss://':'ws://';
+  var ws=new WebSocket(proto+location.host+'/ws/logs?token='+encodeURIComponent(authToken));
   ws.onopen=function(){dot.classList.add('ok');};
   ws.onclose=function(){dot.classList.remove('ok');setTimeout(connect,2000);};
   ws.onmessage=function(e){colorize(e.data);};

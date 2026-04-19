@@ -30,6 +30,11 @@
 void dacp_init(void);
 
 /**
+ * Check whether the DACP client internals are initialized.
+ */
+bool dacp_is_initialized(void);
+
+/**
  * Store the DACP session identifiers from the RTSP handshake.
  * Called when DACP-ID and Active-Remote headers are parsed.
  *
