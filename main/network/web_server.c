@@ -21,8 +21,12 @@
 #include "led.h"
 #include "wifi.h"
 #include "ethernet.h"
+#if CONFIG_WEB_OTA_UPDATE
 #include "ota.h"
+#endif
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
 #include "log_stream.h"
+#endif
 #include "rtsp_server.h"
 #include "receiver_state.h"
 #include "status_service.h"
@@ -43,6 +47,9 @@ static httpd_handle_t s_server = NULL;
 #define AUTH_TOKEN_BYTES   24
 #define AUTH_TOKEN_HEX_LEN (AUTH_TOKEN_BYTES * 2)
 #define AUTH_TTL_US        (15ULL * 60ULL * 1000000ULL)
+#define BASE_URI_HANDLER_BUDGET 22
+#define DIAG_URI_HANDLER_BUDGET 18
+#define URI_HANDLER_HEADROOM    6
 
 typedef struct {
   char token[AUTH_TOKEN_HEX_LEN + 1];
@@ -245,6 +252,26 @@ static esp_err_t read_request_body(httpd_req_t *req, char *buf, size_t buf_len,
 
 static esp_err_t schedule_restart(void) {
   return system_actions_schedule_restart();
+}
+
+static esp_err_t register_uri_handler_checked(httpd_handle_t server,
+                                              const httpd_uri_t *uri,
+                                              bool required) {
+  if (!server || !uri) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t err = httpd_register_uri_handler(server, uri);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to register %s %s: %s%s", 
+             uri->method == HTTP_GET ? "GET" :
+             uri->method == HTTP_POST ? "POST" :
+             uri->method == HTTP_PUT ? "PUT" :
+             uri->method == HTTP_DELETE ? "DELETE" : "HTTP",
+             uri->uri ? uri->uri : "(null)", esp_err_to_name(err),
+             required ? " [required]" : " [optional]");
+  }
+  return err;
 }
 
 #if CONFIG_ENABLE_DEV_DIAGNOSTICS
@@ -847,6 +874,7 @@ static esp_err_t hap_reset_handler(httpd_req_t *req) {
 }
 
 #if CONFIG_ENABLE_DEV_DIAGNOSTICS
+#if CONFIG_WEB_OTA_UPDATE
 static esp_err_t ota_update_handler(httpd_req_t *req) {
   if (ensure_access(req, false) != ESP_OK) {
     return ESP_FAIL;
@@ -878,6 +906,7 @@ static esp_err_t ota_update_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 #endif
+#endif
 
 static esp_err_t status_handler(httpd_req_t *req) {
   if (ensure_access(req, true) != ESP_OK) {
@@ -905,6 +934,11 @@ static esp_err_t status_handler(httpd_req_t *req) {
   cJSON_AddBoolToObject(status, "playing", snapshot.playing);
   cJSON_AddNumberToObject(status, "free_heap", snapshot.free_heap);
   cJSON_AddNumberToObject(status, "min_free_heap", snapshot.min_free_heap);
+  cJSON_AddNumberToObject(status, "largest_internal_block",
+                          snapshot.largest_internal_block);
+  cJSON_AddNumberToObject(status, "free_psram", snapshot.free_psram);
+  cJSON_AddNumberToObject(status, "largest_psram_block",
+                          snapshot.largest_psram_block);
   cJSON_AddNumberToObject(status, "reconnect_count", snapshot.reconnect_count);
 
   cJSON_AddStringToObject(pipeline, "codec", snapshot.pipeline.codec);
@@ -1284,9 +1318,15 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_open_sockets = 3; // Limit to save lwIP socket slots for AirPlay
 #endif
   config.lru_purge_enable = true; // Reclaim stale sockets when all are in use
-  config.max_uri_handlers = 32;   // Room for captive portal, APIs, logs, EQ
+  config.max_uri_handlers = BASE_URI_HANDLER_BUDGET + URI_HANDLER_HEADROOM;
   config.max_resp_headers = 8;
+  config.stack_size = 6144;
+
+#if CONFIG_ENABLE_DEV_DIAGNOSTICS
+  config.max_uri_handlers =
+      BASE_URI_HANDLER_BUDGET + DIAG_URI_HANDLER_BUDGET + URI_HANDLER_HEADROOM;
   config.stack_size = 8192;
+#endif
 
   esp_err_t err = httpd_start(&s_server, &config);
   if (err != ESP_OK) {
@@ -1297,66 +1337,118 @@ esp_err_t web_server_start(uint16_t port) {
   // Register handlers
   httpd_uri_t root_uri = {
       .uri = "/", .method = HTTP_GET, .handler = root_handler};
-  httpd_register_uri_handler(s_server, &root_uri);
+  if ((err = register_uri_handler_checked(s_server, &root_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t favicon_uri = {
       .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_handler};
-  httpd_register_uri_handler(s_server, &favicon_uri);
+  if ((err = register_uri_handler_checked(s_server, &favicon_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t auth_status_uri = {.uri = "/api/auth/status",
                                  .method = HTTP_GET,
                                  .handler = auth_status_handler};
-  httpd_register_uri_handler(s_server, &auth_status_uri);
+  if ((err = register_uri_handler_checked(s_server, &auth_status_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t auth_login_uri = {.uri = "/api/auth/login",
                                 .method = HTTP_POST,
                                 .handler = auth_login_handler};
-  httpd_register_uri_handler(s_server, &auth_login_uri);
+  if ((err = register_uri_handler_checked(s_server, &auth_login_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t auth_logout_uri = {.uri = "/api/auth/logout",
                                  .method = HTTP_POST,
                                  .handler = auth_logout_handler};
-  httpd_register_uri_handler(s_server, &auth_logout_uri);
+  if ((err = register_uri_handler_checked(s_server, &auth_logout_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t wifi_scan_uri = {.uri = "/api/wifi/scan",
                                .method = HTTP_GET,
                                .handler = wifi_scan_handler};
-  httpd_register_uri_handler(s_server, &wifi_scan_uri);
+  if ((err = register_uri_handler_checked(s_server, &wifi_scan_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t wifi_config_uri = {.uri = "/api/wifi/config",
                                  .method = HTTP_POST,
                                  .handler = wifi_config_handler};
-  httpd_register_uri_handler(s_server, &wifi_config_uri);
+  if ((err = register_uri_handler_checked(s_server, &wifi_config_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t device_name_uri = {.uri = "/api/device/name",
                                  .method = HTTP_POST,
                                  .handler = device_name_handler};
-  httpd_register_uri_handler(s_server, &device_name_uri);
+  if ((err = register_uri_handler_checked(s_server, &device_name_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t wifi_reset_uri = {.uri = "/api/wifi/reset",
                                 .method = HTTP_POST,
                                 .handler = wifi_reset_handler};
-  httpd_register_uri_handler(s_server, &wifi_reset_uri);
+  if ((err = register_uri_handler_checked(s_server, &wifi_reset_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t hap_reset_uri = {.uri = "/api/airplay/reset-pairing",
                                .method = HTTP_POST,
                                .handler = hap_reset_handler};
-  httpd_register_uri_handler(s_server, &hap_reset_uri);
+  if ((err = register_uri_handler_checked(s_server, &hap_reset_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t status_uri = {.uri = "/api/status",
                             .method = HTTP_GET,
                             .handler = status_handler};
-  httpd_register_uri_handler(s_server, &status_uri);
+  if ((err = register_uri_handler_checked(s_server, &status_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t legacy_status_uri = {.uri = "/api/system/info",
                                    .method = HTTP_GET,
                                    .handler = status_handler};
-  httpd_register_uri_handler(s_server, &legacy_status_uri);
+  if ((err = register_uri_handler_checked(s_server, &legacy_status_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t system_restart_uri = {.uri = "/api/system/restart",
                                     .method = HTTP_POST,
                                     .handler = system_restart_handler};
-  httpd_register_uri_handler(s_server, &system_restart_uri);
+  if ((err = register_uri_handler_checked(s_server, &system_restart_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   // Captive portal detection endpoints
   static const char *captive_uris[] = {
@@ -1370,106 +1462,192 @@ esp_err_t web_server_start(uint16_t port) {
     httpd_uri_t captive = {.uri = captive_uris[i],
                            .method = HTTP_GET,
                            .handler = captive_portal_redirect};
-    httpd_register_uri_handler(s_server, &captive);
+    if ((err = register_uri_handler_checked(s_server, &captive, true)) != ESP_OK) {
+      httpd_stop(s_server);
+      s_server = NULL;
+      return err;
+    }
   }
 
 #if CONFIG_ENABLE_DEV_DIAGNOSTICS
   httpd_uri_t logs_uri = {
       .uri = "/logs", .method = HTTP_GET, .handler = logs_page_handler};
-  httpd_register_uri_handler(s_server, &logs_uri);
+  if ((err = register_uri_handler_checked(s_server, &logs_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_uri = {
       .uri = "/core", .method = HTTP_GET, .handler = core_page_handler};
-  httpd_register_uri_handler(s_server, &core_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_status_uri = {.uri = "/api/core/status",
                                  .method = HTTP_GET,
                                  .handler = core_status_handler};
-  httpd_register_uri_handler(s_server, &core_status_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_status_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_volume_get_uri = {.uri = "/api/core/volume",
                                      .method = HTTP_GET,
                                      .handler = core_volume_get_handler};
-  httpd_register_uri_handler(s_server, &core_volume_get_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_volume_get_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_volume_post_uri = {.uri = "/api/core/volume",
                                       .method = HTTP_POST,
                                       .handler = core_volume_post_handler};
-  httpd_register_uri_handler(s_server, &core_volume_post_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_volume_post_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_play_pause_uri = {.uri = "/api/core/play-pause",
                                      .method = HTTP_POST,
                                      .handler = core_play_pause_handler};
-  httpd_register_uri_handler(s_server, &core_play_pause_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_play_pause_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_volume_up_uri = {.uri = "/api/core/volume/up",
                                     .method = HTTP_POST,
                                     .handler = core_volume_up_handler};
-  httpd_register_uri_handler(s_server, &core_volume_up_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_volume_up_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_volume_down_uri = {.uri = "/api/core/volume/down",
                                       .method = HTTP_POST,
                                       .handler = core_volume_down_handler};
-  httpd_register_uri_handler(s_server, &core_volume_down_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_volume_down_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_audio_stats_uri = {.uri = "/api/core/audio/stats",
                                       .method = HTTP_GET,
                                       .handler = core_audio_stats_handler};
-  httpd_register_uri_handler(s_server, &core_audio_stats_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_audio_stats_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_led_state_uri = {.uri = "/api/core/led/state",
                                     .method = HTTP_GET,
                                     .handler = core_led_state_handler};
-  httpd_register_uri_handler(s_server, &core_led_state_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_led_state_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t core_led_post_uri = {.uri = "/api/core/led",
                                    .method = HTTP_POST,
                                    .handler = core_led_post_handler};
-  httpd_register_uri_handler(s_server, &core_led_post_uri);
+  if ((err = register_uri_handler_checked(s_server, &core_led_post_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t legacy_hap_reset_uri = {.uri = "/api/hap/reset",
                                       .method = HTTP_POST,
                                       .handler = hap_reset_handler};
-  httpd_register_uri_handler(s_server, &legacy_hap_reset_uri);
+  if ((err = register_uri_handler_checked(s_server, &legacy_hap_reset_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
+#if CONFIG_WEB_OTA_UPDATE
   httpd_uri_t ota_uri = {.uri = "/api/ota/update",
                          .method = HTTP_POST,
                          .handler = ota_update_handler};
-  httpd_register_uri_handler(s_server, &ota_uri);
+  if ((err = register_uri_handler_checked(s_server, &ota_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
+#endif
 
   httpd_uri_t fs_upload_uri = {.uri = "/api/fs/upload",
                                .method = HTTP_POST,
                                .handler = fs_upload_handler};
-  httpd_register_uri_handler(s_server, &fs_upload_uri);
+  if ((err = register_uri_handler_checked(s_server, &fs_upload_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t fs_delete_uri = {.uri = "/api/fs/delete",
                                .method = HTTP_POST,
                                .handler = fs_delete_handler};
-  httpd_register_uri_handler(s_server, &fs_delete_uri);
+  if ((err = register_uri_handler_checked(s_server, &fs_delete_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t fs_list_uri = {
       .uri = "/api/fs/list", .method = HTTP_GET, .handler = fs_list_handler};
-  httpd_register_uri_handler(s_server, &fs_list_uri);
+  if ((err = register_uri_handler_checked(s_server, &fs_list_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
 #ifdef CONFIG_DAC_TAS58XX
   httpd_uri_t eq_page_uri = {
       .uri = "/eq", .method = HTTP_GET, .handler = eq_page_handler};
-  httpd_register_uri_handler(s_server, &eq_page_uri);
+  if ((err = register_uri_handler_checked(s_server, &eq_page_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t eq_get_uri = {
       .uri = "/api/eq", .method = HTTP_GET, .handler = eq_get_handler};
-  httpd_register_uri_handler(s_server, &eq_get_uri);
+  if ((err = register_uri_handler_checked(s_server, &eq_get_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   httpd_uri_t eq_post_uri = {
       .uri = "/api/eq", .method = HTTP_POST, .handler = eq_post_handler};
-  httpd_register_uri_handler(s_server, &eq_post_uri);
+  if ((err = register_uri_handler_checked(s_server, &eq_post_uri, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 #endif
 #endif
 
   httpd_uri_t catch_all = {.uri = "/*",
                            .method = HTTP_GET,
                            .handler = captive_portal_redirect};
-  httpd_register_uri_handler(s_server, &catch_all);
+  if ((err = register_uri_handler_checked(s_server, &catch_all, true)) != ESP_OK) {
+    httpd_stop(s_server);
+    s_server = NULL;
+    return err;
+  }
 
   // Registration of /ws/logs is now handled safely within log_stream_register
 #if CONFIG_ENABLE_DEV_DIAGNOSTICS

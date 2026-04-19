@@ -37,6 +37,7 @@
 // observed AirPlay 2 pre-buffer depth and well below any real seek delta.
 #define POST_FLUSH_STALE_THRESHOLD_US 10000000LL // 10 seconds
 #define POST_FLUSH_STALE_HITS_TO_FLUSH 6
+#define MAX_REASONABLE_EARLY_US 30000000LL
 #define LOCAL_ANCHOR_FALLBACK_US 300000LL
 #define NTP_EPOCH_OFFSET_SECONDS 2208988800ULL
 #define NTP_ENTER_STREAK 2
@@ -122,28 +123,30 @@ static bool compute_early_us(const audio_timing_t *timing,
   int64_t frame_offset_ns =
       ((int64_t)rtp_delta * 1000000000LL) / format->sample_rate;
 
-  int64_t target_ns;
+  int64_t anchor_target_local_ns = timing->anchor_target_local_ns;
+  int64_t ntp_offset_ns = timing->last_good_ntp_offset_ns;
+
+  if (timing->post_flush && timing->post_flush_start_us > 0) {
+    if (timing->post_flush_anchor_target_local_ns != 0) {
+      anchor_target_local_ns = timing->post_flush_anchor_target_local_ns;
+    }
+    if (timing->post_flush_ntp_offset_ns != 0) {
+      ntp_offset_ns = timing->post_flush_ntp_offset_ns;
+    }
+  }
+
+  int64_t target_ns = anchor_target_local_ns + frame_offset_ns;
   switch (sync_mode) {
   case SYNC_MODE_PTP:
-    // PTP not used in AirPlay 1 — fall through to NTP
-    target_ns = (int64_t)timing->anchor_network_time_ns + frame_offset_ns;
     break;
   case SYNC_MODE_NTP:
-    // AirPlay 1: use network time with NTP offset for multi-room sync
-    // offset = remote_time - local_time, so local = remote - offset
-    target_ns = (int64_t)timing->anchor_network_time_ns -
-                ntp_clock_get_offset_ns() + frame_offset_ns;
+    if (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP &&
+        timing->anchor_network_time_ns != 0 && ntp_offset_ns != 0) {
+      target_ns = ((int64_t)timing->anchor_network_time_ns - ntp_offset_ns) +
+                  frame_offset_ns;
+    }
     break;
   default:
-    // Fallback: if we recently had valid NTP, hold that offset briefly to
-    // avoid abrupt timeline jumps while the NTP tracker recovers.
-    if (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP &&
-        timing->last_good_ntp_offset_ns != 0) {
-      target_ns = (int64_t)timing->anchor_network_time_ns -
-                  timing->last_good_ntp_offset_ns + frame_offset_ns;
-    } else {
-      target_ns = timing->anchor_local_time_ns + frame_offset_ns;
-    }
     break;
   }
 
@@ -151,9 +154,6 @@ static bool compute_early_us(const audio_timing_t *timing,
   target_ns -= (int64_t)HARDWARE_OUTPUT_LATENCY_US * 1000LL;
 
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
-  if (sync_mode == SYNC_MODE_NTP) {
-    now_ns += (int64_t)NTP_EPOCH_OFFSET_SECONDS * 1000000000LL;
-  }
   *early_us = (target_ns - now_ns) / 1000LL;
 
   return true;
@@ -175,6 +175,9 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   timing->ntp_unsane_streak = 0;
   timing->sync_mode_hold_until_us = 0;
   timing->last_good_ntp_offset_ns = 0;
+  timing->anchor_target_local_ns = 0;
+  timing->post_flush_anchor_target_local_ns = 0;
+  timing->post_flush_ntp_offset_ns = 0;
 
   if (pending_capacity > 0) {
     timing->pending_frame = (uint8_t *)malloc(pending_capacity);
@@ -210,6 +213,9 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->ntp_unsane_streak = 0;
   timing->sync_mode_hold_until_us = 0;
   timing->last_good_ntp_offset_ns = 0;
+  timing->anchor_target_local_ns = 0;
+  timing->post_flush_anchor_target_local_ns = 0;
+  timing->post_flush_ntp_offset_ns = 0;
 }
 
 void audio_timing_set_format(audio_timing_t *timing,
@@ -280,16 +286,25 @@ void audio_timing_set_anchor(audio_timing_t *timing,
   timing->anchor_rtp_time = rtp_time;
   timing->anchor_network_time_ns = network_time_ns;
   timing->anchor_local_time_ns = now_ns;
+  timing->anchor_target_local_ns = now_ns;
   timing->ptp_locked = false; // AirPlay 1 uses NTP, not PTP
   timing->anchor_valid = true;
   timing->control_sync_seen = true;
   timing->anchor_source =
       clock_id != 0 ? AUDIO_ANCHOR_SOURCE_PTP : AUDIO_ANCHOR_SOURCE_NTP;
+  if (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP) {
+    int64_t offset_ns = ntp_clock_get_offset_ns();
+    if (offset_ns != 0) {
+      timing->anchor_target_local_ns = (int64_t)network_time_ns - offset_ns;
+      timing->last_good_ntp_offset_ns = offset_ns;
+    }
+  }
   ESP_LOGI(TAG,
            "Anchor established: source=%s rtp=%" PRIu32
-           " net_ns=%" PRIu64 " local_ns=%" PRId64,
+           " net_ns=%" PRIu64 " local_ns=%" PRId64
+           " target_local_ns=%" PRId64,
            anchor_source_name((audio_anchor_source_t)timing->anchor_source),
-           rtp_time, network_time_ns, now_ns);
+           rtp_time, network_time_ns, now_ns, timing->anchor_target_local_ns);
 }
 
 void audio_timing_force_local_anchor(audio_timing_t *timing,
@@ -304,6 +319,7 @@ void audio_timing_force_local_anchor(audio_timing_t *timing,
   timing->anchor_local_time_ns =
       ((int64_t)esp_timer_get_time() * 1000LL) +
       ((int64_t)HARDWARE_OUTPUT_LATENCY_US * 1000LL);
+  timing->anchor_target_local_ns = timing->anchor_local_time_ns;
   timing->anchor_valid = true;
   timing->anchor_source = AUDIO_ANCHOR_SOURCE_LOCAL;
   timing->ntp_offset_sane = false;
@@ -392,6 +408,12 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     }
     timing->ntp_unsane_streak = 0;
     timing->last_good_ntp_offset_ns = ntp_clock_get_offset_ns();
+    if (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP &&
+        timing->anchor_network_time_ns != 0) {
+      timing->anchor_target_local_ns =
+          (int64_t)timing->anchor_network_time_ns -
+          timing->last_good_ntp_offset_ns;
+    }
   } else {
     timing->ntp_sane_streak = 0;
     if (timing->ntp_unsane_streak < 255) {
@@ -417,26 +439,30 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
   if ((uint8_t)sync_mode != timing->last_sync_mode) {
     ESP_LOGI(TAG,
              "sync mode: %s -> %s (anchor=%s locked=%d tracking=%d sane=%d "
-             "buffered=%d reject_streak=%d age_ms=%lld)",
+             "buffered=%d reject_streak=%d age_ms=%lld offset_ns=%lld "
+             "comparison_basis=local)",
              sync_mode_name((sync_mode_t)timing->last_sync_mode),
              sync_mode_name(sync_mode),
              anchor_source_name((audio_anchor_source_t)timing->anchor_source),
              ntp_locked ? 1 : 0, ntp_tracking ? 1 : 0,
              timing->ntp_offset_sane ? 1 : 0, buffered_frames,
              ntp_clock_get_reject_streak(),
-             (long long)ntp_clock_get_last_accept_age_ms());
+             (long long)ntp_clock_get_last_accept_age_ms(),
+             (long long)timing->last_good_ntp_offset_ns);
     timing->last_sync_mode = (uint8_t)sync_mode;
     timing->last_sync_mode_log_us = now_us;
   } else if (sync_mode == SYNC_MODE_NONE &&
              now_us - timing->last_sync_mode_log_us >= 5000000LL) {
     ESP_LOGW(TAG,
              "sync local hold: anchor=%s locked=%d tracking=%d sane=%d "
-             "buffered=%d streak=%d age_ms=%lld",
+             "buffered=%d streak=%d age_ms=%lld offset_ns=%lld "
+             "comparison_basis=local",
              anchor_source_name((audio_anchor_source_t)timing->anchor_source),
              ntp_locked ? 1 : 0, ntp_tracking ? 1 : 0,
              timing->ntp_offset_sane ? 1 : 0, buffered_frames,
              ntp_clock_get_reject_streak(),
-             (long long)ntp_clock_get_last_accept_age_ms());
+             (long long)ntp_clock_get_last_accept_age_ms(),
+             (long long)timing->last_good_ntp_offset_ns);
     timing->last_sync_mode_log_us = now_us;
   }
 
@@ -528,6 +554,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         // immediately rather than waiting out the phone's pre-buffer window.
         timing->post_flush = true;
         timing->post_flush_start_us = 0;
+        timing->post_flush_anchor_target_local_ns = 0;
+        timing->post_flush_ntp_offset_ns = 0;
         return 0;
       }
     }
@@ -556,9 +584,30 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           // may never happen if the pre-buffer depth exceeds the threshold).
           if (timing->post_flush_start_us == 0) {
             timing->post_flush_start_us = esp_timer_get_time();
+            timing->post_flush_anchor_target_local_ns =
+                timing->anchor_target_local_ns;
+            timing->post_flush_ntp_offset_ns = timing->last_good_ntp_offset_ns;
           }
           int64_t flush_elapsed =
               esp_timer_get_time() - timing->post_flush_start_us;
+          if (early_us > MAX_REASONABLE_EARLY_US ||
+              early_us < -MAX_REASONABLE_EARLY_US) {
+            ESP_LOGW(TAG,
+                     "post_flush: ignoring implausible timing early=%lld ms "
+                     "anchor=%s sync=%s offset_ns=%lld comparison_basis=local",
+                     early_us / 1000LL,
+                     anchor_source_name(
+                         (audio_anchor_source_t)timing->anchor_source),
+                     sync_mode_name(sync_mode),
+                     (long long)timing->post_flush_ntp_offset_ns);
+            if (from_pending) {
+              timing->pending_valid = false;
+              timing->pending_frame_len = 0;
+            } else {
+              audio_buffer_return(buffer, item);
+            }
+            return 0;
+          }
           // Exception: frames that are MORE than POST_FLUSH_STALE_THRESHOLD_US
           // early are old-position data still draining from the TCP kernel
           // buffer (e.g. frames from 2:30 after a seek back to 0:00).  Discard
@@ -568,9 +617,14 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             if (timing->post_flush_stale_hits == 1) {
               ESP_LOGW(TAG,
                        "post_flush: stale frame detected early=%lld ms "
-                       "elapsed=%lld ms buffered=%d",
+                       "elapsed=%lld ms buffered=%d anchor=%s sync=%s "
+                       "offset_ns=%lld comparison_basis=local",
                        early_us / 1000LL, flush_elapsed / 1000LL,
-                       audio_buffer_get_frame_count(buffer));
+                       audio_buffer_get_frame_count(buffer),
+                       anchor_source_name(
+                           (audio_anchor_source_t)timing->anchor_source),
+                       sync_mode_name(sync_mode),
+                       (long long)timing->post_flush_ntp_offset_ns);
             }
             if (timing->post_flush_stale_hits >= POST_FLUSH_STALE_HITS_TO_FLUSH) {
               // Require several consecutive stale hits before bulk flush to
@@ -592,6 +646,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
               timing->consecutive_early_frames = 0;
               timing->consecutive_late_frames = 0;
               timing->post_flush_stale_hits = 0;
+              timing->post_flush_anchor_target_local_ns = 0;
+              timing->post_flush_ntp_offset_ns = 0;
               // Keep post_flush=true so new-position frames that refill the
               // buffer will play immediately rather than waiting out the
               // anchor.
@@ -620,10 +676,29 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             timing->post_flush = false;
             timing->post_flush_start_us = 0;
             timing->post_flush_stale_hits = 0;
+            timing->post_flush_anchor_target_local_ns = 0;
+            timing->post_flush_ntp_offset_ns = 0;
           }
           timing->consecutive_early_frames = 0;
           timing->consecutive_late_frames = 0;
           // Fall through to play the frame.
+        } else if (early_us > MAX_REASONABLE_EARLY_US ||
+                   early_us < -MAX_REASONABLE_EARLY_US) {
+          ESP_LOGW(TAG,
+                   "Ignoring implausible timing early=%lld ms anchor=%s "
+                   "sync=%s offset_ns=%lld comparison_basis=local",
+                   early_us / 1000LL,
+                   anchor_source_name(
+                       (audio_anchor_source_t)timing->anchor_source),
+                   sync_mode_name(sync_mode),
+                   (long long)timing->last_good_ntp_offset_ns);
+          if (from_pending) {
+            timing->pending_valid = false;
+            timing->pending_frame_len = 0;
+          } else {
+            audio_buffer_return(buffer, item);
+          }
+          return 0;
         } else if (early_us > TIMING_THRESHOLD_US) {
           timing->consecutive_early_frames++;
 

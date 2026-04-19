@@ -113,6 +113,11 @@ static void add_status_result(cJSON *result) {
   cJSON_AddBoolToObject(status, "playing", snapshot.playing);
   cJSON_AddNumberToObject(status, "free_heap", snapshot.free_heap);
   cJSON_AddNumberToObject(status, "min_free_heap", snapshot.min_free_heap);
+  cJSON_AddNumberToObject(status, "largest_internal_block",
+                          snapshot.largest_internal_block);
+  cJSON_AddNumberToObject(status, "free_psram", snapshot.free_psram);
+  cJSON_AddNumberToObject(status, "largest_psram_block",
+                          snapshot.largest_psram_block);
   cJSON_AddNumberToObject(status, "reconnect_count", snapshot.reconnect_count);
 
   cJSON_AddStringToObject(pipeline, "codec", snapshot.pipeline.codec);

@@ -45,7 +45,7 @@ button{border:0;border-radius:10px;padding:11px 16px;font-size:14px;font-weight:
 <div class='wrap'>
 <section class='hero'>
   <h1>M5CoreS3 AirPlay Receiver</h1>
-  <p>Modern Apple-device discovery, Wi-Fi onboarding, and playback health in one minimal control surface.</p>
+  <p>AirPlay-first control surface for Wi-Fi onboarding, receiver identity, and playback health without the heavier diagnostics tooling.</p>
   <div class='pulse'><span id='state-dot' class='dot'></span><span id='state-text'>Loading receiver status...</span></div>
   <div id='hero-msg'></div>
 </section>
@@ -81,7 +81,7 @@ button{border:0;border-radius:10px;padding:11px 16px;font-size:14px;font-weight:
       <button class='bad' onclick='resetWiFi()'>Clear Wi-Fi</button>
     </div>
     <div id='auth-msg'></div>
-    <p class='small' style='margin-top:12px'>AP setup mode exposes just enough to bring the device onto your network. Normal network changes require a management session.</p>
+    <p class='small' style='margin-top:12px'>AP setup mode exposes just enough to bring the receiver onto your network. OTA upload, USB serial management, and diagnostics can be enabled later in Kconfig when needed.</p>
   </article>
 
   <article class='card wifi'>
@@ -229,7 +229,9 @@ async function refreshStatus(){
     document.getElementById('st-play').textContent=s.playing?'playing':'idle';
     document.getElementById('st-track').textContent=s.track_title?(s.track_title+(s.track_artist?' / '+s.track_artist:'')):'-';
     document.getElementById('st-perf').textContent=(p.output_latency_us/1000).toFixed(0)+' ms / '+p.avg_task_load_pct+'% avg';
-    document.getElementById('st-heap').textContent=Math.round(s.free_heap/1024)+' KB free / '+Math.round(s.min_free_heap/1024)+' KB min';
+    document.getElementById('st-heap').textContent=
+      Math.round(s.free_heap/1024)+' KB int free / '+
+      Math.round(s.free_psram/1024)+' KB psram free';
     document.getElementById('st-reco').textContent=String(s.reconnect_count||0);
     document.getElementById('dev-name').value=s.device_name||'';
     var tone=stateTone(s.receiver_state||'');

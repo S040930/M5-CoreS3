@@ -1,6 +1,7 @@
 #include "status_service.h"
 
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "audio/audio_receiver.h"
 #include "ethernet.h"
 #include "esp_system.h"
@@ -69,6 +70,11 @@ void status_service_get_snapshot(status_service_snapshot_t *snapshot) {
   snapshot->playing = audio_receiver_is_playing();
   snapshot->free_heap = esp_get_free_heap_size();
   snapshot->min_free_heap = esp_get_minimum_free_heap_size();
+  snapshot->largest_internal_block =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  snapshot->free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  snapshot->largest_psram_block =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
   snapshot->reconnect_count = s_reconnect_count;
 
   if (snapshot->eth_connected) {

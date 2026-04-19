@@ -34,9 +34,7 @@ set( SRC_FILES
     "network/ntp_clock.c"
     "network/socket_utils.c"
     "network/web_server.c"
-    "network/ota.c"
     "network/dns_server.c"
-    "network/log_stream.c"
     "network/structured_trace.c"
     "led.c"
     "audio/eq_events.c"
@@ -50,6 +48,14 @@ set( SRC_FILES
 # W5500 SPI Ethernet
 if(CONFIG_ETH_W5500_ENABLED)
     list(APPEND SRC_FILES "network/ethernet.c")
+endif()
+
+if(CONFIG_ENABLE_DEV_DIAGNOSTICS)
+    list(APPEND SRC_FILES "network/log_stream.c")
+endif()
+
+if(CONFIG_WEB_OTA_UPDATE)
+    list(APPEND SRC_FILES "network/ota.c")
 endif()
 
 set( INC_DIRS
@@ -71,7 +77,6 @@ set( DEPS
     esp_timer
     esp_http_server
     esp_http_client
-    app_update
     json
     mbedtls
     esp_driver_ledc
@@ -83,6 +88,10 @@ set( DEPS
     m5stack_core_s3_noglib
     spiffs_storage
 )
+
+if(CONFIG_WEB_OTA_UPDATE)
+    list(APPEND DEPS app_update)
+endif()
 
 if(CONFIG_BT_A2DP_ENABLE)
     list(APPEND DEPS bt)

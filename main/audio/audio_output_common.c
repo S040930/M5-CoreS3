@@ -191,9 +191,20 @@ static void playback_task(void *arg) {
     } else {
       static uint32_t zero_read_count = 0;
       if (++zero_read_count % 100 == 0) {
-        ESP_LOGW(TAG, "[playback] 100x zero reads detected, buffer=%u, anchor=%d",
-                 audio_receiver_get_buffered_frames(),
-                 audio_receiver_anchor_valid());
+        uint32_t buffered_frames = audio_receiver_get_buffered_frames();
+        bool anchor_valid = audio_receiver_anchor_valid();
+        bool playing = audio_receiver_is_playing();
+        if (playing && (anchor_valid || buffered_frames > 0)) {
+          ESP_LOGW(TAG,
+                   "[playback] 100x zero reads detected, buffer=%u, anchor=%d, "
+                   "playing=%d",
+                   buffered_frames, anchor_valid ? 1 : 0, playing ? 1 : 0);
+        } else {
+          ESP_LOGD(TAG,
+                   "[playback] idle zero reads, buffer=%u, anchor=%d, "
+                   "playing=%d",
+                   buffered_frames, anchor_valid ? 1 : 0, playing ? 1 : 0);
+        }
       }
       if (s_ops && s_ops->write_pcm) {
         if (last_good_buf && last_good_samples > 0 &&

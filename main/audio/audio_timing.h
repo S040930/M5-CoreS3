@@ -21,6 +21,7 @@ typedef struct {
   uint64_t anchor_network_time_ns;
   uint32_t anchor_rtp_time;
   int64_t anchor_local_time_ns;
+  int64_t anchor_target_local_ns;
   int64_t ready_time_us; // When buffer became ready (0 = not ready yet)
   bool ptp_locked;
   uint8_t *pending_frame;
@@ -45,6 +46,8 @@ typedef struct {
   bool post_flush;
   int64_t post_flush_start_us; // esp_timer_get_time() when post_flush began
   int post_flush_stale_hits;
+  int64_t post_flush_anchor_target_local_ns;
+  int64_t post_flush_ntp_offset_ns;
   // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq present):
   // keep playing until a frame with rtp_timestamp >= flush_until_ts arrives,
   // then bulk-flush and start fresh.  Written by the RTSP task, read by the

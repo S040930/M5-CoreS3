@@ -21,6 +21,9 @@ typedef struct {
   bool playing;
   uint32_t free_heap;
   uint32_t min_free_heap;
+  uint32_t largest_internal_block;
+  uint32_t free_psram;
+  uint32_t largest_psram_block;
   uint32_t reconnect_count;
   audio_pipeline_snapshot_t pipeline;
 } status_service_snapshot_t;
