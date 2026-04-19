@@ -40,3 +40,12 @@ CONFIG_WIFI_FACTORY_PASSWORD=""
 
 # AirPlay 1 (classic RAOP) mode — forced unconditionally
 CONFIG_AIRPLAY_FORCE_V1=y
+
+# Default shipping profile: keep the setup/status web surface, but leave
+# diagnostics, OTA upload, and USB/Web Serial management opt-in.
+# CONFIG_ENABLE_DEV_DIAGNOSTICS is not set
+# CONFIG_WEB_OTA_UPDATE is not set
+# CONFIG_USB_WEB_CONTROL is not set
+# CONFIG_STRUCTURED_TRACE_ENABLE is not set
+# CONFIG_HTTPD_WS_SUPPORT is not set
+CONFIG_AUDIO_MAX_BUFFER_MS=180
