@@ -16,6 +16,9 @@ typedef struct {
   int mclk_multiple;
   bool muted;
   int volume;
+  float current_volume_db;
+  float target_volume_db;
+  bool ramping;
   int reg04;
   int reg05;
   int reg06;
@@ -85,3 +88,14 @@ esp_err_t audio_output_get_diag(audio_output_diag_t *diag);
  */
 esp_err_t audio_output_play_test_tone(uint32_t frequency_hz, uint32_t duration_ms,
                                       uint8_t amplitude_pct);
+
+/**
+ * Update desired output volume in AirPlay dB scale (-30..0).
+ * CoreS3 applies the value through a smooth ramp.
+ */
+void audio_output_set_target_volume_db(float volume_db);
+
+/**
+ * Mute/unmute hardware output without altering target volume.
+ */
+void audio_output_set_muted(bool muted);

@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include "audio_output.h"
 #include "dac.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
@@ -128,6 +129,9 @@ esp_err_t settings_init(void) {
   }
 #endif
 
+  // Keep output layer in sync even before an RTSP session is active.
+  audio_output_set_target_volume_db(g_volume_db);
+
   return ESP_OK;
 }
 
@@ -151,6 +155,7 @@ esp_err_t settings_set_volume(float volume_db) {
   }
 
   dac_set_volume(volume_db);
+  audio_output_set_target_volume_db(volume_db);
 
   g_volume_db = volume_db;
   g_volume_loaded = true;

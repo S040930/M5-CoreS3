@@ -207,6 +207,9 @@ static esp_err_t add_audio_diag_result(cJSON *result) {
   cJSON_AddNumberToObject(result, "mclk_multiple", diag.mclk_multiple);
   cJSON_AddBoolToObject(result, "mute", diag.muted);
   cJSON_AddNumberToObject(result, "volume", diag.volume);
+  cJSON_AddNumberToObject(result, "current_volume_db", diag.current_volume_db);
+  cJSON_AddNumberToObject(result, "target_volume_db", diag.target_volume_db);
+  cJSON_AddBoolToObject(result, "volume_ramping", diag.ramping);
 
   cJSON *aw88298 = cJSON_CreateObject();
   if (!aw88298) {
