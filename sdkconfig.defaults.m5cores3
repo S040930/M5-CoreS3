@@ -33,7 +33,7 @@ CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
 # Default home Wi-Fi seeding is disabled for public/shared builds.
-# If you need local factory seeding, override in a private sdkconfig.user.* file.
+# Keep secrets and one-off lab credentials out of the committed defaults.
 # CONFIG_WIFI_FACTORY_DEFAULT_ENABLE is not set
 CONFIG_WIFI_FACTORY_SSID=""
 CONFIG_WIFI_FACTORY_PASSWORD=""

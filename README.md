@@ -81,26 +81,16 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ---
 
-## 自定义配置 (`user_platformio.ini`)
+## 配置规则
 
-您可以添加 **`user_platformio.ini`**（已通过 `extra_configs` 合并）来覆盖引脚或功能，而无需编辑主配置。
+本仓库只保留两份正式默认配置文件：
 
-1. 扩展 **`env:m5cores3`**。
-2. 添加 **`sdkconfig.user.*`** 文件，包含 Kconfig 覆盖（GPIO、可选显示等）。
-3. 链式默认值：`sdkconfig.defaults` → `sdkconfig.defaults.m5cores3` → 您的文件（最后一个生效）。
+- [`sdkconfig.defaults`](sdkconfig.defaults)：跨板级的正式产品默认值
+- [`sdkconfig.defaults.m5cores3`](sdkconfig.defaults.m5cores3)：M5Stack CoreS3 的板级默认值
 
-**`user_platformio.ini` 示例：**
+默认构建、发布和文档都只认这两份文件。修改正式产品行为时，请直接更新 `sdkconfig.defaults*`，不要引入额外的 `sdkconfig.<board>`、`sdkconfig.<profile>` 或 `sdkconfig.user.*` 文件作为仓库接口。
 
-```ini
-[env:my-cores3]
-extends = env:m5cores3
-board_build.cmake_extra_args =
-    "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.m5cores3;sdkconfig.user.mycores3"
-```
-
-然后执行：`pio run -e my-cores3 -t upload`
-
-`sdkconfig.user.*` 文件旨在被 git 忽略，以便本地调整保持私有。
+`sdkconfig` 自动生成快照可在本地实验时临时出现，但它们不是正式配置源，不应提交，也不应成为 README 或构建流程的一部分。
 
 ---
 
