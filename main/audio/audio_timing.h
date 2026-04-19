@@ -44,6 +44,7 @@ typedef struct {
   // still seconds early (would cause permanent silence).
   bool post_flush;
   int64_t post_flush_start_us; // esp_timer_get_time() when post_flush began
+  int post_flush_stale_hits;
   // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq present):
   // keep playing until a frame with rtp_timestamp >= flush_until_ts arrives,
   // then bulk-flush and start fresh.  Written by the RTSP task, read by the
@@ -51,6 +52,12 @@ typedef struct {
   // mutex (write flush_until_ts first, arm bool second; read bool first).
   bool deferred_flush_pending;
   uint32_t flush_until_ts;
+  uint8_t last_sync_mode;
+  int64_t last_sync_mode_log_us;
+  uint8_t ntp_sane_streak;
+  uint8_t ntp_unsane_streak;
+  int64_t sync_mode_hold_until_us;
+  int64_t last_good_ntp_offset_ns;
 } audio_timing_t;
 
 typedef enum {

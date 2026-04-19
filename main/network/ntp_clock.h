@@ -31,9 +31,21 @@ void ntp_clock_stop(void);
  */
 bool ntp_clock_is_locked(void);
 bool ntp_clock_has_sane_offset(void);
+bool ntp_clock_is_tracking(void);
 
 /**
  * Get current offset from local clock to remote time in nanoseconds.
  * remote_time = local_time + offset
  */
 int64_t ntp_clock_get_offset_ns(void);
+
+/**
+ * Get current reject streak count.
+ */
+int ntp_clock_get_reject_streak(void);
+
+/**
+ * Get age (ms) since last accepted timing sample.
+ * Returns -1 when no accepted sample exists yet.
+ */
+int64_t ntp_clock_get_last_accept_age_ms(void);

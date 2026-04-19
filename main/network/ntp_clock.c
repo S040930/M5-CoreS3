@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -14,7 +15,11 @@
 static const char *TAG = "ntp_clock";
 
 #define NTP_EPOCH_OFFSET_SECONDS 2208988800ULL
-#define MAX_SANE_OFFSET_NS       5000000000LL
+#define BOOTSTRAP_MIN_MEASUREMENTS 4
+#define MAX_TRACKING_DELTA_NS     250000000LL
+#define MAX_ACCEPTED_SAMPLE_AGE_US 20000000LL
+#define NTP_SANE_HOLDOVER_US     15000000LL
+#define NTP_REJECT_STREAK_MAX    6
 
 // Timing packet types (from shairport-sync)
 #define TIMING_REQUEST  0xD2
@@ -33,7 +38,6 @@ typedef struct __attribute__((packed)) {
 
 // Number of measurements to keep for stability
 #define TIMING_HISTORY_SIZE 8
-#define MIN_MEASUREMENTS    3
 #define TIMING_INTERVAL_MS  3000 // Send request every 3 seconds
 
 #define NTP_STACK_SIZE 3072
@@ -50,13 +54,54 @@ static struct {
 
   // Clock offset tracking
   bool locked;
+  bool tracking;
   bool sane_offset;
   int64_t offset_ns; // Current best offset
+  int64_t last_good_offset_ns;
   int64_t measurements[TIMING_HISTORY_SIZE];
   int64_t dispersions[TIMING_HISTORY_SIZE];
   int measurement_count;
   int measurement_index;
+  int accepted_count;
+  int reject_streak;
+  int64_t last_accept_us;
 } ntp = {0};
+
+static void accept_measurement(int64_t offset_ns, int64_t dispersion_ns) {
+  int idx = ntp.measurement_index;
+  ntp.measurements[idx] = offset_ns;
+  ntp.dispersions[idx] = dispersion_ns;
+  ntp.measurement_index = (idx + 1) % TIMING_HISTORY_SIZE;
+  if (ntp.measurement_count < TIMING_HISTORY_SIZE) {
+    ntp.measurement_count++;
+  }
+
+  int64_t best_offset = offset_ns;
+  int64_t best_dispersion = dispersion_ns;
+  for (int i = 0; i < ntp.measurement_count; i++) {
+    if (ntp.dispersions[i] < best_dispersion) {
+      best_dispersion = ntp.dispersions[i];
+      best_offset = ntp.measurements[i];
+    }
+  }
+
+  ntp.offset_ns = best_offset;
+  ntp.last_good_offset_ns = best_offset;
+  ntp.sane_offset = true;
+  ntp.accepted_count++;
+  ntp.reject_streak = 0;
+  ntp.last_accept_us = esp_timer_get_time();
+
+  if (!ntp.tracking && ntp.accepted_count >= BOOTSTRAP_MIN_MEASUREMENTS) {
+    ntp.tracking = true;
+    ntp.locked = true;
+    ESP_LOGI(TAG,
+             "NTP bootstrap complete: offset=%lld ms dispersion=%lld us "
+             "samples=%d",
+             (long long)(ntp.offset_ns / 1000000LL),
+             (long long)(best_dispersion / 1000LL), ntp.accepted_count);
+  }
+}
 
 // Convert NTP timestamp from packet to nanoseconds
 static int64_t ntp_to_ns(uint32_t secs, uint32_t frac) {
@@ -136,46 +181,52 @@ static void process_timing_response(const uint8_t *packet, size_t len) {
     return;
   }
 
-  bool sane_offset = llabs(offset_ns) <= MAX_SANE_OFFSET_NS;
-  if (!sane_offset) {
-    ESP_LOGW(TAG, "Rejecting timing offset outside sane range: %lld ms",
-             (long long)(offset_ns / 1000000LL));
-    ntp.sane_offset = false;
-    return;
-  }
-
-  // Store measurement
-  int idx = ntp.measurement_index;
-  ntp.measurements[idx] = offset_ns;
-  ntp.dispersions[idx] = dispersion_ns;
-  ntp.measurement_index = (idx + 1) % TIMING_HISTORY_SIZE;
-  if (ntp.measurement_count < TIMING_HISTORY_SIZE) {
-    ntp.measurement_count++;
-  }
-
-  // Find best measurement (lowest dispersion)
-  int64_t best_offset = offset_ns;
-  int64_t best_dispersion = dispersion_ns;
-  for (int i = 0; i < ntp.measurement_count; i++) {
-    if (ntp.dispersions[i] < best_dispersion) {
-      best_dispersion = ntp.dispersions[i];
-      best_offset = ntp.measurements[i];
+  bool reject = false;
+  const char *reject_reason = NULL;
+  int64_t delta_ns = 0;
+  if (ntp.tracking) {
+    delta_ns = llabs(offset_ns - ntp.last_good_offset_ns);
+    if (delta_ns > MAX_TRACKING_DELTA_NS) {
+      reject = true;
+      reject_reason = "delta-too-large";
     }
   }
 
-  ntp.offset_ns = best_offset;
-  ntp.sane_offset = true;
-
-  // Consider locked after enough measurements
-  if (!ntp.locked && ntp.measurement_count >= MIN_MEASUREMENTS) {
-    ntp.locked = true;
-    ESP_LOGI(TAG, "NTP timing locked: offset=%lld ms, dispersion=%lld us",
-             (long long)(ntp.offset_ns / 1000000),
-             (long long)(best_dispersion / 1000));
+  if (reject) {
+    int64_t now_us = esp_timer_get_time();
+    ntp.reject_streak++;
+    bool holdover_active =
+        ntp.last_accept_us > 0 &&
+        (now_us - ntp.last_accept_us) <= NTP_SANE_HOLDOVER_US &&
+        ntp.reject_streak <= NTP_REJECT_STREAK_MAX;
+    if (holdover_active) {
+      ntp.sane_offset = true;
+      ESP_LOGW(TAG,
+               "Rejecting timing sample: reason=%s delta=%lld ms "
+               "(holdover active, streak=%d)",
+               reject_reason ? reject_reason : "unknown",
+               (long long)(delta_ns / 1000000LL), ntp.reject_streak);
+    } else {
+      ntp.sane_offset = false;
+      if (now_us - ntp.last_accept_us > MAX_ACCEPTED_SAMPLE_AGE_US) {
+        ntp.locked = false;
+      }
+      ESP_LOGW(TAG,
+               "Rejecting timing sample: reason=%s delta=%lld ms "
+               "(marking unsane, streak=%d)",
+               reject_reason ? reject_reason : "unknown",
+               (long long)(delta_ns / 1000000LL), ntp.reject_streak);
+    }
+    return;
   }
 
-  ESP_LOGD(TAG, "Timing: RTT=%lld us, offset=%lld ms",
-           (long long)(round_trip_ns / 1000), (long long)(offset_ns / 1000000));
+  accept_measurement(offset_ns, dispersion_ns);
+
+  ESP_LOGD(TAG,
+           "Timing: RTT=%lld us offset=%lld ms tracking=%d accepted=%d",
+           (long long)(round_trip_ns / 1000),
+           (long long)(offset_ns / 1000000), ntp.tracking ? 1 : 0,
+           ntp.accepted_count);
 }
 
 // Send timing request
@@ -279,10 +330,15 @@ esp_err_t ntp_clock_start_client(uint32_t remote_ip, uint16_t remote_port) {
 
   // Reset state
   ntp.locked = false;
+  ntp.tracking = false;
   ntp.sane_offset = false;
   ntp.offset_ns = 0;
+  ntp.last_good_offset_ns = 0;
   ntp.measurement_count = 0;
   ntp.measurement_index = 0;
+  ntp.accepted_count = 0;
+  ntp.reject_streak = 0;
+  ntp.last_accept_us = 0;
   memset(ntp.measurements, 0, sizeof(ntp.measurements));
   memset(ntp.dispersions, 0, sizeof(ntp.dispersions));
   ntp.running = true;
@@ -324,8 +380,12 @@ void ntp_clock_stop(void) {
   }
 
   ntp.locked = false;
+  ntp.tracking = false;
   ntp.sane_offset = false;
   ntp.measurement_count = 0;
+  ntp.accepted_count = 0;
+  ntp.reject_streak = 0;
+  ntp.last_accept_us = 0;
   ESP_LOGI(TAG, "NTP timing stopped");
 }
 
@@ -337,6 +397,25 @@ bool ntp_clock_has_sane_offset(void) {
   return ntp.sane_offset;
 }
 
+bool ntp_clock_is_tracking(void) {
+  return ntp.tracking && ntp.sane_offset;
+}
+
 int64_t ntp_clock_get_offset_ns(void) {
-  return ntp.offset_ns;
+  return ntp.sane_offset ? ntp.offset_ns : ntp.last_good_offset_ns;
+}
+
+int ntp_clock_get_reject_streak(void) {
+  return ntp.reject_streak;
+}
+
+int64_t ntp_clock_get_last_accept_age_ms(void) {
+  if (ntp.last_accept_us <= 0) {
+    return -1;
+  }
+  int64_t age_us = esp_timer_get_time() - ntp.last_accept_us;
+  if (age_us < 0) {
+    age_us = 0;
+  }
+  return age_us / 1000LL;
 }

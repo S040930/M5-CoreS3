@@ -131,20 +131,6 @@ static bool ensure_buffer_capacity(uint8_t **buffer, size_t *capacity,
   return true;
 }
 
-static bool append_buffer_bytes(uint8_t **buffer, size_t *capacity,
-                                size_t *data_len, const uint8_t *data,
-                                size_t len) {
-  if (len == 0) {
-    return true;
-  }
-  if (!ensure_buffer_capacity(buffer, capacity, *data_len, len)) {
-    return false;
-  }
-  memcpy(*buffer + *data_len, data, len);
-  *data_len += len;
-  return true;
-}
-
 // Process buffered RTSP requests
 static bool process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
                                 size_t *buf_len) {

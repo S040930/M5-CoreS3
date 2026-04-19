@@ -36,6 +36,8 @@ static float s_current_volume_db = -15.0f;
 static bool s_volume_state_init = false;
 static bool s_output_muted = false;
 static int64_t s_last_ramp_update_us = 0;
+static bool s_hw_mute_applied = false;
+static bool s_hw_mute_state_init = false;
 
 static float clamp_volume_db(float db) {
   if (db < VOLUME_MIN_DB) {
@@ -49,7 +51,16 @@ static float clamp_volume_db(float db) {
 
 static int db_to_hw_volume(float db) {
   float clamped = clamp_volume_db(db);
-  float ratio = (clamped - VOLUME_MIN_DB) / (VOLUME_MAX_DB - VOLUME_MIN_DB);
+  // Map dB to perceived loudness using a logarithmic scale.
+  float min_linear = powf(10.0f, VOLUME_MIN_DB / 20.0f);
+  float linear = powf(10.0f, clamped / 20.0f);
+  float ratio = (linear - min_linear) / (1.0f - min_linear);
+  if (ratio < 0.0f) {
+    ratio = 0.0f;
+  }
+  if (ratio > 1.0f) {
+    ratio = 1.0f;
+  }
   int hw = (int)lroundf((float)CORES3_HW_VOLUME_MIN +
                         ratio * (float)(CORES3_HW_VOLUME_MAX - CORES3_HW_VOLUME_MIN));
   if (hw < CORES3_HW_VOLUME_MIN) {
@@ -80,6 +91,20 @@ static void apply_volume_step(bool force) {
   portEXIT_CRITICAL(&s_volume_lock);
 
   if (!force && (now_us - last_update_us) < VOLUME_RAMP_INTERVAL_US) {
+    // Keep mute state synchronized even when volume ramp tick is throttled.
+    bool hw_mute = muted || (current_db <= VOLUME_MIN_DB + 0.01f);
+    if (!s_hw_mute_state_init || hw_mute != s_hw_mute_applied) {
+      int mute_ret = esp_codec_dev_set_out_mute(s_speaker_handle, hw_mute);
+      if (mute_ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TAG, "CoreS3 mute apply failed mute=%d target=%.1f cur=%.1f",
+                 mute_ret, target_db, current_db);
+      } else {
+        s_hw_mute_applied = hw_mute;
+        s_hw_mute_state_init = true;
+        ESP_LOGI(TAG, "Volume state sync: mute=%d target=%.1f cur=%.1f",
+                 hw_mute ? 1 : 0, target_db, current_db);
+      }
+    }
     return;
   }
 
@@ -109,6 +134,14 @@ static void apply_volume_step(bool force) {
   s_current_volume_db = next_db;
   s_last_ramp_update_us = now_us;
   portEXIT_CRITICAL(&s_volume_lock);
+  s_hw_mute_applied = hw_mute;
+  s_hw_mute_state_init = true;
+
+  if (fabsf(target_db - next_db) > 4.0f) {
+    ESP_LOGW(TAG,
+             "Volume ramp lag: target=%.1f current=%.1f hw=%d mute=%d force=%d",
+             target_db, next_db, hw_volume, hw_mute ? 1 : 0, force ? 1 : 0);
+  }
 }
 
 static int cores3_mclk_multiple_for_rate(uint32_t rate) {
@@ -214,6 +247,8 @@ esp_err_t audio_output_init(void) {
     s_volume_state_init = true;
   }
   s_last_ramp_update_us = 0;
+  s_hw_mute_applied = false;
+  s_hw_mute_state_init = false;
   portEXIT_CRITICAL(&s_volume_lock);
 
   ESP_RETURN_ON_ERROR(open_output(AO_OUTPUT_RATE), TAG, "speaker open failed");

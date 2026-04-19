@@ -97,18 +97,6 @@ static int rtsp_create_udp_socket(uint16_t *port) {
   return sock;
 }
 
-static int rtsp_create_event_socket(uint16_t *port) {
-  uint16_t bound_port = 0;
-  int sock = socket_utils_bind_tcp_listener(0, 1, false, &bound_port);
-  if (sock < 0) {
-    return -1;
-  }
-  if (port) {
-    *port = bound_port;
-  }
-  return sock;
-}
-
 static void ensure_stream_ports(rtsp_conn_t *conn, bool buffered) {
   int temp_socket = 0;
   if (!buffered && conn->data_port == 0) {
@@ -799,11 +787,16 @@ static void handle_record(int socket, rtsp_conn_t *conn,
   rtsp_events_emit(RTSP_EVENT_PLAYING, NULL);
 
   // Diagnostics: log timing anchor state
-  ESP_LOGI(TAG, "RECORD: audio_output_active=%d, buffer_frames=%u, anchor_valid=%d, ntp_locked=%d",
+  ESP_LOGI(TAG,
+           "RECORD: audio_output_active=%d, buffer_frames=%u, anchor_valid=%d, "
+           "ntp_locked=%d ntp_tracking=%d reject_streak=%d age_ms=%lld",
            audio_output_is_active(),
            audio_receiver_get_buffered_frames(),
            audio_receiver_anchor_valid(),
-           ntp_clock_is_locked());
+           ntp_clock_is_locked(),
+           ntp_clock_is_tracking(),
+           ntp_clock_get_reject_streak(),
+           (long long)ntp_clock_get_last_accept_age_ms());
 
   // Force playback start if anchor/NTP not yet available
   audio_timing_force_start();

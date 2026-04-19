@@ -36,8 +36,13 @@
 // and must be discarded rather than played.  10 s is well above the deepest
 // observed AirPlay 2 pre-buffer depth and well below any real seek delta.
 #define POST_FLUSH_STALE_THRESHOLD_US 10000000LL // 10 seconds
+#define POST_FLUSH_STALE_HITS_TO_FLUSH 6
 #define LOCAL_ANCHOR_FALLBACK_US 300000LL
 #define NTP_EPOCH_OFFSET_SECONDS 2208988800ULL
+#define NTP_ENTER_STREAK 2
+#define NTP_EXIT_STREAK  4
+#define SYNC_MODE_HOLD_US 3000000LL
+#define POST_FLUSH_SYNC_FREEZE_US 3000000LL
 
 static const char *TAG = "audio_time";
 // consecutive_early_frames resets on seek/discontinuity (see anchor_rtp_discontinuity)
@@ -93,6 +98,17 @@ typedef enum {
   SYNC_MODE_NTP,  // AirPlay 1 NTP sync
 } sync_mode_t;
 
+static const char *sync_mode_name(sync_mode_t mode) {
+  switch (mode) {
+  case SYNC_MODE_PTP:
+    return "ptp";
+  case SYNC_MODE_NTP:
+    return "ntp";
+  default:
+    return "local";
+  }
+}
+
 // Compute how early (positive) or late (negative) a frame is in microseconds
 static bool compute_early_us(const audio_timing_t *timing,
                              const audio_format_t *format,
@@ -119,8 +135,15 @@ static bool compute_early_us(const audio_timing_t *timing,
                 ntp_clock_get_offset_ns() + frame_offset_ns;
     break;
   default:
-    // Fallback: use local anchor time (no multi-room sync)
-    target_ns = timing->anchor_local_time_ns + frame_offset_ns;
+    // Fallback: if we recently had valid NTP, hold that offset briefly to
+    // avoid abrupt timeline jumps while the NTP tracker recovers.
+    if (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP &&
+        timing->last_good_ntp_offset_ns != 0) {
+      target_ns = (int64_t)timing->anchor_network_time_ns -
+                  timing->last_good_ntp_offset_ns + frame_offset_ns;
+    } else {
+      target_ns = timing->anchor_local_time_ns + frame_offset_ns;
+    }
     break;
   }
 
@@ -146,6 +169,12 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   timing->playing = true;
   timing->anchor_source = AUDIO_ANCHOR_SOURCE_NONE;
   timing->ntp_offset_sane = true;
+  timing->last_sync_mode = SYNC_MODE_NONE;
+  timing->last_sync_mode_log_us = 0;
+  timing->ntp_sane_streak = 0;
+  timing->ntp_unsane_streak = 0;
+  timing->sync_mode_hold_until_us = 0;
+  timing->last_good_ntp_offset_ns = 0;
 
   if (pending_capacity > 0) {
     timing->pending_frame = (uint8_t *)malloc(pending_capacity);
@@ -172,8 +201,15 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->consecutive_late_frames = 0;
   timing->post_flush = false;
   timing->post_flush_start_us = 0;
+  timing->post_flush_stale_hits = 0;
   timing->deferred_flush_pending = false;
   timing->flush_until_ts = 0;
+  timing->last_sync_mode = SYNC_MODE_NONE;
+  timing->last_sync_mode_log_us = 0;
+  timing->ntp_sane_streak = 0;
+  timing->ntp_unsane_streak = 0;
+  timing->sync_mode_hold_until_us = 0;
+  timing->last_good_ntp_offset_ns = 0;
 }
 
 void audio_timing_set_format(audio_timing_t *timing,
@@ -337,12 +373,71 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     }
   }
 
-  // Determine sync mode: NTP (AirPlay 1) or local fallback
-  sync_mode_t sync_mode = SYNC_MODE_NONE;
+  // Determine sync mode with hysteresis to avoid local/NTP oscillation.
+  sync_mode_t sync_mode = (sync_mode_t)timing->last_sync_mode;
+  bool ntp_locked = ntp_clock_is_locked();
+  bool ntp_tracking = ntp_clock_is_tracking();
   timing->ntp_offset_sane = ntp_clock_has_sane_offset();
-  if (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP &&
-      ntp_clock_is_locked() && timing->ntp_offset_sane) {
-    sync_mode = SYNC_MODE_NTP;
+  bool ntp_healthy =
+      (timing->anchor_source == AUDIO_ANCHOR_SOURCE_NTP) && ntp_tracking;
+
+  int64_t now_us = esp_timer_get_time();
+  bool in_post_flush_freeze =
+      timing->post_flush && timing->post_flush_start_us > 0 &&
+      (now_us - timing->post_flush_start_us) < POST_FLUSH_SYNC_FREEZE_US;
+
+  if (ntp_healthy) {
+    if (timing->ntp_sane_streak < 255) {
+      timing->ntp_sane_streak++;
+    }
+    timing->ntp_unsane_streak = 0;
+    timing->last_good_ntp_offset_ns = ntp_clock_get_offset_ns();
+  } else {
+    timing->ntp_sane_streak = 0;
+    if (timing->ntp_unsane_streak < 255) {
+      timing->ntp_unsane_streak++;
+    }
+  }
+
+  if (!in_post_flush_freeze && now_us >= timing->sync_mode_hold_until_us) {
+    if (sync_mode != SYNC_MODE_NTP && timing->ntp_sane_streak >= NTP_ENTER_STREAK) {
+      sync_mode = SYNC_MODE_NTP;
+      timing->sync_mode_hold_until_us = now_us + SYNC_MODE_HOLD_US;
+    } else if (sync_mode == SYNC_MODE_NTP &&
+               timing->ntp_unsane_streak >= NTP_EXIT_STREAK) {
+      sync_mode = SYNC_MODE_NONE;
+      timing->sync_mode_hold_until_us = now_us + SYNC_MODE_HOLD_US;
+    }
+  }
+
+  if (in_post_flush_freeze) {
+    sync_mode = (sync_mode_t)timing->last_sync_mode;
+  }
+
+  if ((uint8_t)sync_mode != timing->last_sync_mode) {
+    ESP_LOGI(TAG,
+             "sync mode: %s -> %s (anchor=%s locked=%d tracking=%d sane=%d "
+             "buffered=%d reject_streak=%d age_ms=%lld)",
+             sync_mode_name((sync_mode_t)timing->last_sync_mode),
+             sync_mode_name(sync_mode),
+             anchor_source_name((audio_anchor_source_t)timing->anchor_source),
+             ntp_locked ? 1 : 0, ntp_tracking ? 1 : 0,
+             timing->ntp_offset_sane ? 1 : 0, buffered_frames,
+             ntp_clock_get_reject_streak(),
+             (long long)ntp_clock_get_last_accept_age_ms());
+    timing->last_sync_mode = (uint8_t)sync_mode;
+    timing->last_sync_mode_log_us = now_us;
+  } else if (sync_mode == SYNC_MODE_NONE &&
+             now_us - timing->last_sync_mode_log_us >= 5000000LL) {
+    ESP_LOGW(TAG,
+             "sync local hold: anchor=%s locked=%d tracking=%d sane=%d "
+             "buffered=%d streak=%d age_ms=%lld",
+             anchor_source_name((audio_anchor_source_t)timing->anchor_source),
+             ntp_locked ? 1 : 0, ntp_tracking ? 1 : 0,
+             timing->ntp_offset_sane ? 1 : 0, buffered_frames,
+             ntp_clock_get_reject_streak(),
+             (long long)ntp_clock_get_last_accept_age_ms());
+    timing->last_sync_mode_log_us = now_us;
   }
 
   for (int attempt = 0; attempt < 8; attempt++) {
@@ -469,30 +564,51 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           // buffer (e.g. frames from 2:30 after a seek back to 0:00).  Discard
           // those so the user never hears audio from the wrong position.
           if (early_us > POST_FLUSH_STALE_THRESHOLD_US) {
-            // This frame is from the wrong seek position — still draining the
-            // TCP kernel buffer from before the flush.  Bulk-flush the entire
-            // ring buffer so all remaining stale (and any already-queued new)
-            // frames are cleared in one shot.  Draining one-by-one takes
-            // hundreds of DMA callbacks (8 frames/callback × hundreds of stale
-            // frames) causing seconds of silent lag that compounds each seek.
-            ESP_LOGW(
-                TAG, "post_flush: bulk flush %d stale frames (%lld s early)",
-                audio_buffer_get_frame_count(buffer), early_us / 1000000LL);
+            timing->post_flush_stale_hits++;
+            if (timing->post_flush_stale_hits == 1) {
+              ESP_LOGW(TAG,
+                       "post_flush: stale frame detected early=%lld ms "
+                       "elapsed=%lld ms buffered=%d",
+                       early_us / 1000LL, flush_elapsed / 1000LL,
+                       audio_buffer_get_frame_count(buffer));
+            }
+            if (timing->post_flush_stale_hits >= POST_FLUSH_STALE_HITS_TO_FLUSH) {
+              // Require several consecutive stale hits before bulk flush to
+              // avoid a one-off timing spike causing an audible discontinuity.
+              ESP_LOGW(TAG,
+                       "post_flush: bulk flush after %d stale hits, buffered=%d "
+                       "early=%lld ms",
+                       timing->post_flush_stale_hits,
+                       audio_buffer_get_frame_count(buffer), early_us / 1000LL);
+              if (from_pending) {
+                timing->pending_valid = false;
+                timing->pending_frame_len = 0;
+              } else {
+                audio_buffer_return(buffer, item);
+              }
+              audio_buffer_flush(buffer);
+              timing->playout_started = false;
+              timing->ready_time_us = 0;
+              timing->consecutive_early_frames = 0;
+              timing->consecutive_late_frames = 0;
+              timing->post_flush_stale_hits = 0;
+              // Keep post_flush=true so new-position frames that refill the
+              // buffer will play immediately rather than waiting out the
+              // anchor.
+              return 0;
+            }
+
+            // Drop only the current stale frame until stale condition is
+            // confirmed by repeated hits.
             if (from_pending) {
               timing->pending_valid = false;
               timing->pending_frame_len = 0;
             } else {
               audio_buffer_return(buffer, item);
             }
-            audio_buffer_flush(buffer);
-            timing->playout_started = false;
-            timing->ready_time_us = 0;
-            timing->consecutive_early_frames = 0;
-            timing->consecutive_late_frames = 0;
-            // Keep post_flush=true so new-position frames that refill the
-            // buffer will play immediately rather than waiting out the anchor.
             return 0;
           }
+          timing->post_flush_stale_hits = 0;
           // Within pre-buffer depth — keep playing until the anchor is
           // genuinely on-time. Exiting early while frames are still ~seconds
           // ahead re-enables the 40 ms early gate and turns valid audio into
@@ -503,6 +619,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                      early_us / 1000LL, flush_elapsed / 1000LL);
             timing->post_flush = false;
             timing->post_flush_start_us = 0;
+            timing->post_flush_stale_hits = 0;
           }
           timing->consecutive_early_frames = 0;
           timing->consecutive_late_frames = 0;
