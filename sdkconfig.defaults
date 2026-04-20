@@ -37,10 +37,10 @@ CONFIG_LOG_COLORS=y
 
 # Partition table
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="components/boards/partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="components/board_cores3/partitions.csv"
 
 # Compiler optimization
-CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 
 # Memory Tweaks
 # Push allocations > 1024 bytes to SPIRAM, keeping internal DRAM free for

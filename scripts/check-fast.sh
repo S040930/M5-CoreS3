@@ -5,8 +5,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 if command -v rg >/dev/null 2>&1; then
-  if rg -n '^config\.max_uri_handlers = 32;#include ' main/network/web_server.c >/dev/null 2>&1; then
-    echo "Refusing to build: detected corrupted C source prologue in main/network/web_server.c"
+  if rg -n 'components/boards/partitions\.csv|main/network/web_server\.c|tools/usb_web|components/display|components/spiffs_storage|m5stack-core-s3' \
+      CMakeLists.txt README.md PROJECT.md docs platformio.ini sdkconfig.defaults sdkconfig.defaults.m5cores3 sdkconfig.m5cores3 >/dev/null 2>&1; then
+    echo "Refusing quick check: stale pre-refactor paths are still referenced"
     exit 1
   fi
 fi

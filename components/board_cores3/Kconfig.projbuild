@@ -1,0 +1,9 @@
+menu "Board Configuration"
+    config BOARD_M5STACK_CORES3
+        bool "M5Stack CoreS3"
+        default y
+
+    config BOARD_TARGET_PATH
+        string
+        default "board_cores3"
+endmenu

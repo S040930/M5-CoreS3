@@ -1,0 +1,31 @@
+idf_component_register(
+    SRCS
+        "airplay_service.c"
+        "receiver_state.c"
+        "rtsp/rtsp_conn.c"
+        "rtsp/rtsp_events.c"
+        "rtsp/rtsp_handlers.c"
+        "rtsp/rtsp_message.c"
+        "rtsp/rtsp_rsa.c"
+        "rtsp/rtsp_server.c"
+        "plist/plist_xml.c"
+        "plist/bplist_parser.c"
+        "plist/bplist_builder.c"
+        "plist/base64.c"
+    INCLUDE_DIRS
+        "."
+        "rtsp"
+        "plist"
+    REQUIRES
+        audio_core
+        network_core
+        json
+        mbedtls
+        esp_timer
+        esp_netif
+        esp_wifi
+)
+
+target_include_directories(${COMPONENT_LIB} PRIVATE
+    "${PROJECT_DIR}/components/app_core"
+)

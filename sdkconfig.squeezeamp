@@ -776,9 +776,9 @@ CONFIG_ESPTOOLPY_MONITOR_BAUD=115200
 # CONFIG_PARTITION_TABLE_TWO_OTA is not set
 # CONFIG_PARTITION_TABLE_TWO_OTA_LARGE is not set
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="components/boards/partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="components/board_cores3/partitions.csv"
 # default:
-CONFIG_PARTITION_TABLE_FILENAME="components/boards/partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="components/board_cores3/partitions.csv"
 # default:
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 # default:
@@ -871,12 +871,6 @@ CONFIG_LED_RGB_COLOR_STANDBY=0x001100
 #
 # WiFi Configuration
 #
-# default:
-CONFIG_DEFAULT_AP_SSID="ESP32-AirPlay-Setup"
-# default:
-CONFIG_DEFAULT_AP_PASSWORD=""
-# default:
-CONFIG_DEFAULT_AP_CHANNEL=1
 # end of WiFi Configuration
 
 #

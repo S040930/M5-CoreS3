@@ -1,0 +1,56 @@
+menu "Airplay ESP Configuration"
+    menu "Product Profile"
+        config PRODUCT_AIRPLAY_ONLY
+            bool "Build as AirPlay-only receiver"
+            default y
+
+        config ALLOW_INSECURE_RAW_PAIR_VERIFY
+            bool "Allow insecure raw pair-verify compatibility mode"
+            default n
+    endmenu
+
+    menu "Audio Output"
+        config AUDIO_TARGET_LATENCY_MS
+            int "Target playout latency (ms)"
+            range 80 1000
+            default 220
+
+        config AUDIO_MAX_BUFFER_MS
+            int "Maximum queued audio depth (ms)"
+            range 80 2000
+            default 240
+
+        choice OUTPUT_SAMPLE_RATE
+            prompt "Output sample rate"
+            default OUTPUT_SAMPLE_RATE_44100
+
+            config OUTPUT_SAMPLE_RATE_44100
+                bool "44100 Hz"
+            config OUTPUT_SAMPLE_RATE_48000
+                bool "48000 Hz"
+        endchoice
+
+        config OUTPUT_SAMPLE_RATE_HZ
+            int
+            default 44100 if OUTPUT_SAMPLE_RATE_44100
+            default 48000 if OUTPUT_SAMPLE_RATE_48000
+            default 44100
+
+        config RESAMPLER_TAPS
+            int "Resampler filter taps"
+            range 4 64
+            default 28 if IDF_TARGET_ESP32S3
+            default 16
+            depends on OUTPUT_SAMPLE_RATE_48000
+
+        choice AUDIO_FIDELITY_MODE
+            prompt "Audio fidelity mode"
+            default AUDIO_FIDELITY_MODE_PURE
+
+            config AUDIO_FIDELITY_MODE_PURE
+                bool "Pure"
+            config AUDIO_FIDELITY_MODE_ENHANCED
+                bool "Enhanced"
+        endchoice
+    endmenu
+endmenu

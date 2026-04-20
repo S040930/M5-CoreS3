@@ -1,0 +1,36 @@
+idf_component_register(
+    SRCS
+        "audio_pipeline.c"
+        "audio/alac_magic_cookie.c"
+        "audio/audio_buffer.c"
+        "audio/audio_crypto.c"
+        "audio/audio_decoder.c"
+        "audio/audio_dsp.c"
+        "audio/audio_eq.c"
+        "audio/audio_output_common.c"
+        "audio/audio_output_cores3.c"
+        "audio/audio_receiver.c"
+        "audio/audio_resample.c"
+        "audio/audio_stream.c"
+        "audio/audio_stream_buffered.c"
+        "audio/audio_stream_realtime.c"
+        "audio/audio_timing.c"
+        "resampler/resampler.c"
+    INCLUDE_DIRS
+        "."
+        "audio"
+        "resampler"
+    REQUIRES
+        board_cores3
+        network_core
+        esp_audio_codec
+        esp_codec_dev
+        esp_driver_i2s
+        esp_timer
+        mbedtls
+        libsodium
+)
+
+target_include_directories(${COMPONENT_LIB} PRIVATE
+    "${PROJECT_DIR}/components/airplay_core/rtsp"
+)

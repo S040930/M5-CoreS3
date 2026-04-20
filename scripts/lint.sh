@@ -1,6 +1,6 @@
 #!/bin/bash
-# Lint script for the project
-# Usage: lint.sh [--fix]
+#
+# Run clang-tidy against the current CoreS3 AirPlay core tree.
 
 set -e
 
@@ -32,8 +32,13 @@ if ! command -v clang-tidy &>/dev/null; then
 fi
 
 # Ensure compile_commands.json exists
-if [ ! -f build/compile_commands.json ]; then
-  echo "Error: build/compile_commands.json not found. Run a build first (idf.py build)."
+COMPILE_DB="$PROJECT_DIR/compile_commands.json"
+if [ ! -f "$COMPILE_DB" ] && [ -f "$PROJECT_DIR/.pio/build/m5cores3/compile_commands.json" ]; then
+  COMPILE_DB="$PROJECT_DIR/.pio/build/m5cores3/compile_commands.json"
+fi
+
+if [ ! -f "$COMPILE_DB" ]; then
+  echo "Error: compile_commands.json not found. Run '~/.platformio/penv/bin/pio run -e m5cores3' first."
   exit 1
 fi
 
@@ -43,8 +48,11 @@ for sm in $SUBMODULES; do
   EXCLUDE_ARGS+=(-path "$sm" -prune -o)
 done
 
-# Find all C source files in main/ and components/, excluding submodules
-SOURCES=$(find main components "${EXCLUDE_ARGS[@]}" \( -name "*.c" -o -name "*.h" \) -print)
+# Find all C source files in main/ and components/, excluding submodules and generated trees
+SOURCES=$(find main components "${EXCLUDE_ARGS[@]}" \
+  -path "*/managed_components" -prune -o \
+  -path "*/.pio" -prune -o \
+  \( -name "*.c" -o -name "*.h" \) -print)
 
 echo "=== Running clang-tidy ==="
 WARNINGS=0
@@ -52,7 +60,7 @@ for file in $SOURCES; do
   echo "Checking $file..."
   # Run clang-tidy, capture output, filter out ESP-IDF "file not found" errors
   # which are expected when running on the host outside the build environment
-  OUTPUT=$(clang-tidy $FIX_FLAG -p build "$file" 2>&1 || true)
+  OUTPUT=$(clang-tidy $FIX_FLAG -p "$(dirname "$COMPILE_DB")" "$file" 2>&1 || true)
   # Filter out lines about missing ESP-IDF/lwip/freertos headers
   FILTERED=$(echo "$OUTPUT" | grep -v "file not found \[clang-diagnostic" || true)
   # Check if any warnings remain (lines containing ": warning:")

@@ -1,4 +1,4 @@
-# AirPlay 2 Receiver for ESP32
+# CoreS3 AirPlay Core
 cmake_minimum_required(VERSION 3.16)
 
 # Read firmware version from version.txt
@@ -9,4 +9,4 @@ string(STRIP "${PROJECT_VER}" PROJECT_VER)
 set(EXTRA_COMPONENT_DIRS "${CMAKE_SOURCE_DIR}/components")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(airplay2-receiver VERSION ${PROJECT_VER})
+project(cores3_airplay_core VERSION ${PROJECT_VER})

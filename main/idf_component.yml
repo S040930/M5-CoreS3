@@ -1,6 +1,5 @@
 dependencies:
-  espressif/mdns: "*"
-  espressif/libsodium: "*"
-  espressif/esp_audio_codec: "^2.4.0"
-  espressif/led_strip: "*"
-  espressif/m5stack_core_s3_noglib: "^3.0.2"
+  espressif/esp_audio_codec: "2.4.1"
+  espressif/libsodium: "1.0.21"
+  espressif/m5stack_core_s3_noglib: "3.0.2"
+  espressif/mdns: "1.11.0"

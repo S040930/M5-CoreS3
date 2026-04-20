@@ -1087,9 +1087,9 @@ CONFIG_ESPTOOLPY_MONITOR_BAUD=115200
 # CONFIG_PARTITION_TABLE_TWO_OTA is not set
 # CONFIG_PARTITION_TABLE_TWO_OTA_LARGE is not set
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="components/boards/partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="components/board_cores3/partitions.csv"
 # default:
-CONFIG_PARTITION_TABLE_FILENAME="components/boards/partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="components/board_cores3/partitions.csv"
 # default:
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 # default:
@@ -1105,88 +1105,9 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 # default:
 CONFIG_PRODUCT_AIRPLAY_ONLY=y
-# CONFIG_ENABLE_DEV_DIAGNOSTICS is not set
-# CONFIG_USB_WEB_CONTROL is not set
-# CONFIG_STRUCTURED_TRACE_ENABLE is not set
-# end of Product Profile
-
-#
-# Security
-#
-# default:
-CONFIG_WEB_AUTH_REQUIRED=y
 # default:
 # CONFIG_ALLOW_INSECURE_RAW_PAIR_VERIFY is not set
-# default:
-# CONFIG_OTA_SIGNATURE_REQUIRED is not set
-# end of Security
-
-#
-# LED Configuration
-#
-# default:
-CONFIG_LED_STATUS_BRIGHTNESS=60
-
-#
-# Status LED Behavior
-#
-# default:
-CONFIG_LED_STATUS_PLAYING_STEADY=y
-# default:
-# CONFIG_LED_STATUS_PLAYING_BLINK_FAST is not set
-# default:
-# CONFIG_LED_STATUS_PLAYING_VU is not set
-# default:
-# CONFIG_LED_STATUS_PAUSED_OFF is not set
-# default:
-# CONFIG_LED_STATUS_PAUSED_STEADY is not set
-# default:
-# CONFIG_LED_STATUS_PAUSED_BLINK_SLOW is not set
-# default:
-CONFIG_LED_STATUS_PAUSED_BLINK_MEDIUM=y
-# default:
-# CONFIG_LED_STATUS_STANDBY_OFF is not set
-# default:
-CONFIG_LED_STATUS_STANDBY_BLINK_SLOW=y
-# default:
-# CONFIG_LED_STATUS_STANDBY_BLINK_MEDIUM is not set
-# end of Status LED Behavior
-
-#
-# RGB LED Behavior
-#
-# default:
-# CONFIG_LED_RGB_PLAYING_OFF is not set
-# default:
-# CONFIG_LED_RGB_PLAYING_STEADY is not set
-# default:
-CONFIG_LED_RGB_PLAYING_VU=y
-# default:
-# CONFIG_LED_RGB_PAUSED_OFF is not set
-# default:
-CONFIG_LED_RGB_PAUSED_STEADY=y
-# default:
-CONFIG_LED_RGB_STANDBY_OFF=y
-# default:
-# CONFIG_LED_RGB_STANDBY_STEADY is not set
-# default:
-CONFIG_LED_RGB_COLOR_PAUSED=0x000033
-# default:
-CONFIG_LED_RGB_COLOR_STANDBY=0x001100
-# end of RGB LED Behavior
-# end of LED Configuration
-
-#
-# WiFi Configuration
-#
-# default:
-CONFIG_DEFAULT_AP_SSID="ESP32-AirPlay-Setup"
-# default:
-CONFIG_DEFAULT_AP_PASSWORD=""
-# default:
-CONFIG_DEFAULT_AP_CHANNEL=1
-# CONFIG_WIFI_FACTORY_DEFAULT_ENABLE is not set
-# end of WiFi Configuration
+# end of Product Profile
 
 #
 # Audio Output
@@ -1201,35 +1122,10 @@ CONFIG_OUTPUT_SAMPLE_RATE_44100=y
 # default:
 CONFIG_OUTPUT_SAMPLE_RATE_HZ=44100
 # default:
-CONFIG_RESAMPLER_TAPS=28
+CONFIG_AUDIO_FIDELITY_MODE_PURE=y
+# default:
+# CONFIG_AUDIO_FIDELITY_MODE_ENHANCED is not set
 # end of Audio Output
-
-#
-# Display Configuration
-#
-# CONFIG_DISPLAY_ENABLED is not set
-# end of Display Configuration
-
-#
-# AirPlay Protocol
-#
-CONFIG_AIRPLAY_FORCE_V1=y
-# end of AirPlay Protocol
-
-#
-# Button Configuration
-#
-# default:
-CONFIG_BTN_PLAY_PAUSE_GPIO=-1
-# default:
-CONFIG_BTN_VOLUME_UP_GPIO=-1
-# default:
-CONFIG_BTN_VOLUME_DOWN_GPIO=-1
-# default:
-CONFIG_BTN_NEXT_GPIO=-1
-# default:
-CONFIG_BTN_PREV_GPIO=-1
-# end of Button Configuration
 # end of Airplay ESP Configuration
 
 #
@@ -1237,60 +1133,7 @@ CONFIG_BTN_PREV_GPIO=-1
 #
 CONFIG_BOARD_M5STACK_CORES3=y
 # default:
-CONFIG_BOARD_TARGET_PATH="m5stack-core-s3"
-
-#
-# Pin Configuration
-#
-
-#
-# LED GPIOs
-#
-# default:
-CONFIG_LED_STATUS_GPIO=-1
-# default:
-CONFIG_LED_ERROR_GPIO=-1
-CONFIG_LED_RGB_GPIO=48
-# end of LED GPIOs
-
-#
-# I2S and S/PDIF Pin Configuration
-#
-CONFIG_I2S_SCK_IO=-1
-CONFIG_I2S_BCK_IO=-1
-CONFIG_I2S_WS_IO=-1
-CONFIG_I2S_DO_IO=-1
-# default:
-CONFIG_SPDIF_DO_IO=-1
-CONFIG_I2S_GND_IO=-1
-CONFIG_I2S_VCC_IO=-1
-# end of I2S and S/PDIF Pin Configuration
-
-#
-# Control GPIOs
-#
-CONFIG_BAT_CHANNEL=7
-# default:
-CONFIG_DAC_I2C_SDA=-1
-# default:
-CONFIG_DAC_I2C_SCL=-1
-# default:
-CONFIG_JACK_GPIO=-1
-# default:
-CONFIG_SPKFAULT_GPIO=-1
-# default:
-CONFIG_MUTE_GPIO=-1
-# default:
-CONFIG_MUTE_GPIO_LEVEL=0
-# end of Control GPIOs
-
-#
-# SPI and Ethernet Configuration
-#
-# default:
-# CONFIG_ETH_W5500_ENABLED is not set
-# end of SPI and Ethernet Configuration
-# end of Pin Configuration
+CONFIG_BOARD_TARGET_PATH="board_cores3"
 # end of Board Configuration
 
 #
@@ -3916,15 +3759,6 @@ CONFIG_WIFI_PROV_STA_ALL_CHANNEL_SCAN=y
 # default:
 # CONFIG_WIFI_PROV_STA_FAST_SCAN is not set
 # end of Wi-Fi Provisioning Manager
-
-#
-# DAC Configuration
-#
-# default:
-# CONFIG_DAC_TAS57XX is not set
-# default:
-# CONFIG_DAC_TAS58XX is not set
-# end of DAC Configuration
 
 #
 # CMake Utilities

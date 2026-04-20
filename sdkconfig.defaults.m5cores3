@@ -13,36 +13,19 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
 # CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG is not set
 
-# Board peripherals
-CONFIG_BAT_CHANNEL=7
-CONFIG_LED_RGB_GPIO=48
-CONFIG_I2S_SCK_IO=-1
-CONFIG_I2S_BCK_IO=-1
-CONFIG_I2S_WS_IO=-1
-CONFIG_I2S_DO_IO=-1
-CONFIG_I2S_GND_IO=-1
-CONFIG_I2S_VCC_IO=-1
-
-# Keep the first release focused on audio playback
-CONFIG_DISPLAY_ENABLED=n
-
 # iPhone / modern hotspots may use WPA3; STA must negotiate SAE when offered
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
 
 # Wi‑Fi + esp_netif default handlers on sys_evt need more than default 2304 bytes
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
-# Default home Wi-Fi seeding is disabled for public/shared builds.
-# Keep secrets and one-off lab credentials out of the committed defaults.
-# CONFIG_WIFI_FACTORY_DEFAULT_ENABLE is not set
-CONFIG_WIFI_FACTORY_SSID=""
-CONFIG_WIFI_FACTORY_PASSWORD=""
+# Wi-Fi credentials are developer-provisioned outside the firmware UX.
 
 # AirPlay 1 (classic RAOP) mode — forced unconditionally
 CONFIG_AIRPLAY_FORCE_V1=y
 
-# Default shipping profile: keep the setup/status web surface, but leave
-# diagnostics, OTA upload, and USB/Web Serial management opt-in.
+# AirPlay core only: no local web UI, USB management surface, or OTA path.
+# CONFIG_DEVICE_HTTP_SERVER is not set
 # CONFIG_ENABLE_DEV_DIAGNOSTICS is not set
 # CONFIG_WEB_OTA_UPDATE is not set
 # CONFIG_USB_WEB_CONTROL is not set
