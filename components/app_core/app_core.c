@@ -15,6 +15,16 @@ static const char *TAG = "app_core";
 
 static bool s_airplay_started = false;
 
+// ============================================================================
+// Installation-Time Configuration
+// ============================================================================
+// Edit these values before flashing if you want the device to overwrite its
+// current NVS Wi-Fi credentials on boot.
+// 0是表示不使用填入的Wi-Fi，1是使用
+#define INSTALL_WIFI_CREDENTIALS 1
+#define INSTALL_WIFI_SSID        ""
+#define INSTALL_WIFI_PASSWORD    ""
+
 static esp_err_t start_airplay_services(void) {
   if (s_airplay_started) {
     return ESP_OK;
@@ -82,6 +92,27 @@ static esp_err_t init_nvs(void) {
   return ret;
 }
 
+static bool has_bootstrap_wifi_credentials(void) {
+  return INSTALL_WIFI_CREDENTIALS != 0;
+}
+
+static esp_err_t provision_wifi_credentials_if_needed(void) {
+  if (!has_bootstrap_wifi_credentials()) {
+    ESP_LOGI(TAG, "Bootstrap Wi-Fi credentials are empty; skipping NVS write");
+    return ESP_OK;
+  }
+
+  esp_err_t ret = settings_set_wifi_credentials(INSTALL_WIFI_SSID,
+                                                INSTALL_WIFI_PASSWORD);
+  if (ret == ESP_OK) {
+    ESP_LOGI(TAG, "Bootstrapped Wi-Fi credentials into NVS (overwrite mode)");
+  } else {
+    ESP_LOGE(TAG, "Failed to bootstrap Wi-Fi credentials: %s",
+             esp_err_to_name(ret));
+  }
+  return ret;
+}
+
 void app_core_run(void) {
   receiver_state_init();
   receiver_state_dispatch(RECEIVER_EVENT_BOOT);
@@ -96,6 +127,12 @@ void app_core_run(void) {
   ret = settings_init();
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "settings init failed: %s", esp_err_to_name(ret));
+    receiver_state_set_faulted(true);
+    return;
+  }
+
+  ret = provision_wifi_credentials_if_needed();
+  if (ret != ESP_OK) {
     receiver_state_set_faulted(true);
     return;
   }

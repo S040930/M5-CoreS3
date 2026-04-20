@@ -52,7 +52,8 @@ esp_err_t settings_get_wifi_ssid(char *ssid, size_t len);
 esp_err_t settings_get_wifi_password(char *password, size_t len);
 
 /**
- * Save WiFi credentials to persistent storage
+ * Save WiFi credentials to persistent storage.
+ * Empty strings are rejected.
  * @param ssid WiFi SSID
  * @param password WiFi password
  */
