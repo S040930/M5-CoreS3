@@ -53,12 +53,15 @@ static void log_stack_watermark(const char *task_name) {
 
 esp_err_t audio_realtime_preallocate(void) {
   if (!s_recv_task_stack) {
-    /* Prefer PSRAM for task stacks to conserve internal DRAM */
     s_recv_task_stack = heap_caps_malloc(AUDIO_RECV_STACK_SIZE,
                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_recv_task_stack) {
       s_recv_task_stack = heap_caps_malloc(AUDIO_RECV_STACK_SIZE,
                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (!s_recv_task_stack) {
+        ESP_LOGE(TAG, "Failed to allocate recv task stack (PSRAM and DRAM exhausted)");
+        return ESP_ERR_NO_MEM;
+      }
     }
   }
   if (!s_ctrl_task_stack) {
@@ -67,12 +70,11 @@ esp_err_t audio_realtime_preallocate(void) {
     if (!s_ctrl_task_stack) {
       s_ctrl_task_stack = heap_caps_malloc(AUDIO_CTRL_STACK_SIZE,
                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (!s_ctrl_task_stack) {
+        ESP_LOGE(TAG, "Failed to allocate ctrl task stack (PSRAM and DRAM exhausted)");
+        return ESP_ERR_NO_MEM;
+      }
     }
-  }
-  if (!s_recv_task_stack || !s_ctrl_task_stack) {
-    ESP_LOGE(TAG, "Failed to pre-allocate audio stacks (need %d+%d bytes)",
-             AUDIO_RECV_STACK_SIZE, AUDIO_CTRL_STACK_SIZE);
-    return ESP_ERR_NO_MEM;
   }
   ESP_LOGI(TAG, "Pre-allocated audio stacks (%d+%d bytes)",
            AUDIO_RECV_STACK_SIZE, AUDIO_CTRL_STACK_SIZE);

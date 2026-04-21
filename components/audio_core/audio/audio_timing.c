@@ -269,10 +269,15 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!timing->pending_frame) {
       timing->pending_frame = (uint8_t *)malloc(pending_capacity);
+      if (!timing->pending_frame) {
+        ESP_LOGE(TAG, "Failed to allocate pending_frame (PSRAM and DRAM exhausted)");
+        timing->pending_frame_capacity = 0;
+        return;
+      }
     }
-    if (timing->pending_frame) {
-      timing->pending_frame_capacity = pending_capacity;
-    }
+    timing->pending_frame_capacity = pending_capacity;
+  } else {
+    timing->pending_frame_capacity = 0;
   }
 }
 
@@ -647,7 +652,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     bool from_pending = false;
 
     // Get frame from pending or buffer
-    if (timing->pending_valid) {
+    if (timing->pending_valid && timing->pending_frame) {
       item_size = timing->pending_frame_len;
       if (item_size < sizeof(audio_frame_header_t)) {
         timing->pending_valid = false;
@@ -656,6 +661,11 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       }
       item = timing->pending_frame;
       from_pending = true;
+    } else if (timing->pending_valid) {
+      // pending_valid is true but pending_frame is NULL - reset
+      timing->pending_valid = false;
+      timing->pending_frame_len = 0;
+      continue;
     } else {
       if (!audio_buffer_take(buffer, &item, &item_size, 0)) {
         if (stats) {

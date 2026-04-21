@@ -157,16 +157,21 @@ esp_err_t audio_buffer_init(audio_buffer_t *buffer) {
                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buffer->sorted) {
     buffer->sorted = (uint16_t *)malloc(buffer->capacity * sizeof(uint16_t));
+    if (!buffer->sorted) {
+      ESP_LOGE(TAG, "Failed to allocate sorted array (PSRAM and DRAM exhausted)");
+      audio_buffer_deinit(buffer);
+      return ESP_ERR_NO_MEM;
+    }
   }
   buffer->free_stack = (uint16_t *)heap_caps_malloc(buffer->capacity * sizeof(uint16_t),
                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buffer->free_stack) {
     buffer->free_stack = (uint16_t *)malloc(buffer->capacity * sizeof(uint16_t));
-  }
-  if (!buffer->sorted || !buffer->free_stack) {
-    ESP_LOGE(TAG, "Failed to allocate index arrays");
-    audio_buffer_deinit(buffer);
-    return ESP_ERR_NO_MEM;
+    if (!buffer->free_stack) {
+      ESP_LOGE(TAG, "Failed to allocate free_stack (PSRAM and DRAM exhausted)");
+      audio_buffer_deinit(buffer);
+      return ESP_ERR_NO_MEM;
+    }
   }
 
   /* Initialise free stack: all slots available */
@@ -192,11 +197,11 @@ esp_err_t audio_buffer_init(audio_buffer_t *buffer) {
   if (!buffer->frame_buffer) {
     buffer->frame_buffer =
         (uint8_t *)malloc(sizeof(audio_frame_header_t) + max_pcm_bytes);
-  }
-  if (!buffer->frame_buffer) {
-    ESP_LOGE(TAG, "Failed to allocate frame buffer");
-    audio_buffer_deinit(buffer);
-    return ESP_ERR_NO_MEM;
+    if (!buffer->frame_buffer) {
+      ESP_LOGE(TAG, "Failed to allocate frame_buffer (PSRAM and DRAM exhausted)");
+      audio_buffer_deinit(buffer);
+      return ESP_ERR_NO_MEM;
+    }
   }
   buffer->decode_buffer =
       (int16_t *)(buffer->frame_buffer + sizeof(audio_frame_header_t));
