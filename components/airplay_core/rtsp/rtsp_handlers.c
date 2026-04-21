@@ -1096,24 +1096,28 @@ static void handle_set_parameter(int socket, rtsp_conn_t *conn,
     }
   } else if (strstr(req->content_type, "image/jpeg") ||
              strstr(req->content_type, "image/png")) {
-    // Artwork - allocate PSRAM and save data
     if (body && body_len > 0) {
       if (body_len > RTSP_MAX_ARTWORK_BYTES) {
         ESP_LOGW(TAG,
                  "Artwork dropped: %s (%zu bytes) exceeds limit %u bytes",
                  req->content_type, body_len, (unsigned)RTSP_MAX_ARTWORK_BYTES);
       } else {
-        ESP_LOGI(TAG, "Received artwork: %s (%zu bytes)", req->content_type,
-                 body_len);
-        void *art = heap_caps_malloc(body_len, MALLOC_CAP_SPIRAM);
-        if (art) {
-          memcpy(art, body, body_len);
-          event_data.metadata.artwork_data = art;
+        void *artwork_copy = heap_caps_malloc(body_len, MALLOC_CAP_SPIRAM);
+        if (artwork_copy == NULL) {
+          artwork_copy = malloc(body_len);
+        }
+
+        if (artwork_copy != NULL) {
+          memcpy(artwork_copy, body, body_len);
+          event_data.metadata.artwork_data = artwork_copy;
           event_data.metadata.artwork_len = body_len;
           event_data.metadata.has_artwork = true;
           has_metadata = true;
+          ESP_LOGI(TAG, "Received artwork: %s (%zu bytes)", req->content_type,
+                   body_len);
         } else {
-          ESP_LOGE(TAG, "Failed to allocate PSRAM for artwork");
+          ESP_LOGE(TAG, "Artwork allocation failed: %s (%zu bytes)",
+                   req->content_type, body_len);
         }
       }
     }
@@ -1169,6 +1173,12 @@ static void handle_set_parameter(int socket, rtsp_conn_t *conn,
 
   if (has_metadata) {
     rtsp_events_emit(RTSP_EVENT_METADATA, &event_data);
+    if (event_data.metadata.has_artwork && event_data.metadata.artwork_data) {
+      free(event_data.metadata.artwork_data);
+      event_data.metadata.artwork_data = NULL;
+      event_data.metadata.artwork_len = 0;
+      event_data.metadata.has_artwork = false;
+    }
   }
 
   rtsp_send_ok(socket, conn, req->cseq);
@@ -1209,6 +1219,8 @@ static void handle_pause(int socket, rtsp_conn_t *conn,
   audio_receiver_pause();
   flush_output_if_active();
   conn->stream_paused = true;
+
+  rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
 
   rtsp_send_ok(socket, conn, req->cseq);
 }

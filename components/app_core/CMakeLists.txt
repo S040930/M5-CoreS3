@@ -7,5 +7,6 @@ idf_component_register(
         airplay_core
         audio_core
         network_core
+        screen_ui
         nvs_flash
 )

@@ -11,6 +11,7 @@
 #include "audio_output.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -29,6 +30,7 @@ static const char *TAG = "rtsp_server";
 
 #define CLIENT_STACK_SIZE 8192
 #define SERVER_STACK_SIZE 4096
+#define STACK_LOG_INTERVAL_US 15000000LL
 
 static int server_socket = -1;
 static TaskHandle_t server_task_handle = NULL;
@@ -54,6 +56,12 @@ typedef struct {
 static client_slot_t clients[2] = {0}; // Current and old
 static int current_slot = 0;
 
+static void log_stack_watermark(const char *task_name, UBaseType_t watermark) {
+  ESP_LOGI(TAG, "stack watermark[%s]: free_words=%lu free_bytes=%lu",
+           task_name, (unsigned long)watermark,
+           (unsigned long)(watermark * sizeof(StackType_t)));
+}
+
 static void log_ipv4_addr(const char *prefix, uint32_t ip_addr) {
   ESP_LOGI(TAG, "%s%d.%d.%d.%d", prefix, ip_addr & 0xFF,
            (ip_addr >> 8) & 0xFF, (ip_addr >> 16) & 0xFF,
@@ -61,11 +69,18 @@ static void log_ipv4_addr(const char *prefix, uint32_t ip_addr) {
 }
 
 int32_t airplay_get_volume_q15(void) {
-  client_slot_t *c = &clients[current_slot];
-  if (c->conn && !c->is_old) {
-    return rtsp_conn_get_volume_q15(c->conn);
+  // Prefer the current active slot, then scan all slots as a fallback.
+  client_slot_t *current = &clients[current_slot];
+  if (current->conn != NULL && !current->is_old) {
+    return rtsp_conn_get_volume_q15(current->conn);
   }
-  return 16384; // 50% volume for new clients
+
+  for (int i = 0; i < 2; i++) {
+    if (clients[i].conn != NULL && !clients[i].is_old) {
+      return rtsp_conn_get_volume_q15(clients[i].conn);
+    }
+  }
+  return 16384;
 }
 
 static uint8_t *grow_buffer(uint8_t *old_buf, size_t old_size, size_t new_size,
@@ -139,6 +154,7 @@ static bool process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
 static void client_task(void *pvParameters) {
   int slot_idx = (int)(intptr_t)pvParameters;
   client_slot_t *slot = &clients[slot_idx];
+  int64_t last_stack_log_us = esp_timer_get_time();
 
   // Create connection state
   rtsp_conn_t *conn = rtsp_conn_create();
@@ -162,6 +178,8 @@ static void client_task(void *pvParameters) {
              (conn->client_ip >> 8) & 0xFF, (conn->client_ip >> 16) & 0xFF,
              (conn->client_ip >> 24) & 0xFF);
   }
+
+  rtsp_events_emit(RTSP_EVENT_CLIENT_CONNECTED, NULL);
 
   // Allocate buffer
   size_t buf_capacity = RTSP_BUFFER_INITIAL;
@@ -217,6 +235,12 @@ static void client_task(void *pvParameters) {
     }
     buf_len += (size_t)recv_len;
     process_rtsp_buffer(slot, buffer, &buf_len);
+
+    int64_t now_us = esp_timer_get_time();
+    if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+      log_stack_watermark("rtsp_client", uxTaskGetStackHighWaterMark(NULL));
+      last_stack_log_us = now_us;
+    }
   }
 
   ESP_LOGI(TAG,
@@ -250,6 +274,7 @@ static void client_task(void *pvParameters) {
   slot->task = NULL;
   slot->should_stop = false;
   slot->is_old = false;
+  log_stack_watermark("rtsp_client_exit", uxTaskGetStackHighWaterMark(NULL));
 
   vTaskDelete(NULL);
 }
@@ -274,6 +299,7 @@ static void signal_old_client_stop(int old_slot) {
 
 static void server_task(void *pvParameters) {
   (void)pvParameters;
+  int64_t last_stack_log_us = esp_timer_get_time();
 
   struct sockaddr_in server_addr, client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
@@ -376,6 +402,12 @@ static void server_task(void *pvParameters) {
     } else {
       current_slot = new_slot;
     }
+
+    int64_t now_us = esp_timer_get_time();
+    if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+      log_stack_watermark("rtsp_server", uxTaskGetStackHighWaterMark(NULL));
+      last_stack_log_us = now_us;
+    }
   }
 
   // Stop all clients
@@ -395,6 +427,7 @@ static void server_task(void *pvParameters) {
     server_socket = -1;
   }
 
+  log_stack_watermark("rtsp_server_exit", uxTaskGetStackHighWaterMark(NULL));
   vTaskDelete(NULL);
 }
 

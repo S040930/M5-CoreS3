@@ -19,6 +19,7 @@
 #define EQ_RELOAD_MAX_DEFER  12
 #define GAP_CONCEAL_REPEAT_MAX 6
 #define GAP_CONCEAL_FADE_Q15   26214
+#define STACK_LOG_INTERVAL_US 15000000ULL
 
 static const audio_output_hw_ops_t *s_ops = NULL;
 static volatile bool flush_requested = false;
@@ -30,6 +31,13 @@ static volatile bool s_eq_reload_pending = false;
 static uint8_t s_eq_reload_defer_count = 0;
 static uint32_t s_gain_diag_counter = 0;
 static volatile audio_fidelity_mode_t s_fidelity_mode = AUDIO_FIDELITY_MODE_PURE;
+
+static void log_stack_watermark(const char *reason) {
+  UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+  ESP_LOGI(TAG, "stack watermark[%s]: free_words=%lu free_bytes=%lu",
+           reason, (unsigned long)watermark,
+           (unsigned long)(watermark * sizeof(StackType_t)));
+}
 
 static int16_t peak_abs_sample(const int16_t *buf, size_t n) {
   int16_t peak = 0;
@@ -74,7 +82,7 @@ static void maybe_log_gain_path(void) {
   float headroom = (float)headroom_q15 / 32768.0f;
   float vol = (float)vol_q15 / 32768.0f;
   float effective = (float)effective_q15 / 32768.0f;
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "gain path: sw=%d headroom=%.3f vol=%.3f effective=%.3f q15=%ld",
            (s_ops && s_ops->software_volume) ? 1 : 0, headroom, vol, effective,
            (long)effective_q15);
@@ -120,6 +128,7 @@ static void playback_task(void *arg) {
   uint32_t nonzero_write_count = 0;
   audio_stats_t prev_stats = {0};
   audio_dsp_stats_t prev_dsp = {0};
+  uint64_t last_stack_log_us = (uint64_t)esp_timer_get_time();
 
   while (playback_running) {
     uint64_t loop_start_us = (uint64_t)esp_timer_get_time();
@@ -179,16 +188,15 @@ static void playback_task(void *arg) {
         }
       }
 
-      if (++nonzero_write_count % 200 == 0) {
-        ESP_LOGI(TAG, "[playback] wrote %u blocks, peak=%d, samples=%u",
-                 nonzero_write_count, output_peak,
-                 (unsigned)play_samples);
+      if (++nonzero_write_count % 1000 == 0) {
+        ESP_LOGD(TAG, "[playback] wrote %u blocks, peak=%d, samples=%u",
+                 nonzero_write_count, output_peak, (unsigned)play_samples);
         if (output_peak >= CLIP_RISK_PEAK) {
           ESP_LOGW(TAG, "[playback] clip-risk peak=%d >= %d", output_peak,
                    CLIP_RISK_PEAK);
         }
       }
-      if (nonzero_write_count % 500 == 0) {
+      if (nonzero_write_count % 1000 == 0) {
         audio_stats_t cur_stats = {0};
         audio_dsp_stats_t cur_dsp = {0};
         audio_receiver_get_stats(&cur_stats);
@@ -215,6 +223,11 @@ static void playback_task(void *arg) {
       }
       audio_pipeline_note_playback_busy(
           (uint32_t)((uint64_t)esp_timer_get_time() - loop_start_us));
+      uint64_t now_us = (uint64_t)esp_timer_get_time();
+      if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+        log_stack_watermark("audio_play");
+        last_stack_log_us = now_us;
+      }
       taskYIELD();
     } else {
       static uint32_t zero_read_count = 0;
@@ -251,6 +264,11 @@ static void playback_task(void *arg) {
       }
       audio_pipeline_note_playback_busy(
           (uint32_t)((uint64_t)esp_timer_get_time() - loop_start_us));
+      uint64_t now_us = (uint64_t)esp_timer_get_time();
+      if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+        log_stack_watermark("audio_play");
+        last_stack_log_us = now_us;
+      }
       vTaskDelay(1);
     }
   }
@@ -261,6 +279,7 @@ static void playback_task(void *arg) {
   free(last_good_buf);
   playback_running = false;
   playback_task_handle = NULL;
+  log_stack_watermark("audio_play_exit");
   vTaskDelete(NULL);
 }
 

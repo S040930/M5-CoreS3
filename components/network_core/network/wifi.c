@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 
+#include "sdkconfig.h"
 #include "settings.h"
 #include "wifi.h"
 
@@ -201,11 +202,26 @@ esp_err_t wifi_init_sta(void) {
   char ssid[33] = {0};
   char password[65] = {0};
   bool has_credentials = false;
+
+#if CONFIG_WIFI_CREDENTIALS_COMPILE_TIME
+  // Use compile-time credentials from sdkconfig, overriding NVS
+  if (strlen(CONFIG_WIFI_SSID) > 0) {
+    strncpy(ssid, CONFIG_WIFI_SSID, sizeof(ssid) - 1);
+    strncpy(password, CONFIG_WIFI_PASSWORD, sizeof(password) - 1);
+    has_credentials = true;
+    ESP_LOGI(TAG, "Using compile-time WiFi credentials for SSID: %s", ssid);
+    
+    // Save to NVS so they persist if compile-time override is disabled later
+    settings_set_wifi_credentials(ssid, password);
+  }
+#else
+  // Use NVS stored credentials
   if (settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK &&
       settings_get_wifi_password(password, sizeof(password)) == ESP_OK &&
       strlen(ssid) > 0) {
     has_credentials = true;
   }
+#endif
 
   if (!has_credentials) {
     ESP_LOGW(TAG, "No saved STA credentials found");

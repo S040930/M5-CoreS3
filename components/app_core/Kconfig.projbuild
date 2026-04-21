@@ -9,6 +9,27 @@ menu "Airplay ESP Configuration"
             default n
     endmenu
 
+    menu "WiFi Credentials"
+        config WIFI_SSID
+            string "WiFi SSID"
+            default ""
+            help
+                WiFi network name (SSID). Leave empty to use NVS stored credentials.
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default ""
+            help
+                WiFi password. Leave empty for open networks or to use NVS stored credentials.
+
+        config WIFI_CREDENTIALS_COMPILE_TIME
+            bool "Override NVS with compile-time credentials"
+            default y
+            help
+                If enabled, compile-time WiFi credentials will override NVS stored credentials.
+                This ensures each flash overwrites previous WiFi settings.
+    endmenu
+
     menu "Audio Output"
         config AUDIO_TARGET_LATENCY_MS
             int "Target playout latency (ms)"

@@ -7,17 +7,16 @@
 
 static const char *TAG = "settings";
 
-#define NVS_NAMESPACE  "airplay"
+#define NVS_NAMESPACE "airplay"
 #define NVS_KEY_VOLUME "volume_db"
-#define NVS_KEY_WIFI_SSID     "wifi_ssid"
+#define NVS_KEY_WIFI_SSID "wifi_ssid"
 #define NVS_KEY_WIFI_PASSWORD "wifi_pass"
-#define NVS_KEY_DEVICE_NAME   "device_name"
+#define NVS_KEY_DEVICE_NAME "device_name"
 
-#define MAX_WIFI_SSID_LEN     32
+#define MAX_WIFI_SSID_LEN 32
 #define MAX_WIFI_PASSWORD_LEN 64
-#define MAX_DEVICE_NAME_LEN   64
+#define MAX_DEVICE_NAME_LEN 64
 
-// Cached values  (defaults = 50 %)
 static float g_volume_db = -15.0f;
 static bool g_volume_loaded = false;
 
@@ -35,9 +34,7 @@ esp_err_t settings_init(void) {
     nvs_close(nvs);
   }
 
-  // Keep output layer in sync even before an RTSP session is active.
   audio_output_set_target_volume_db(g_volume_db);
-
   return ESP_OK;
 }
 
@@ -45,7 +42,6 @@ esp_err_t settings_get_volume(float *volume_db) {
   if (!volume_db) {
     return ESP_ERR_INVALID_ARG;
   }
-
   if (!g_volume_loaded) {
     return ESP_ERR_NOT_FOUND;
   }
@@ -55,13 +51,11 @@ esp_err_t settings_get_volume(float *volume_db) {
 }
 
 esp_err_t settings_set_volume(float volume_db) {
-  // Skip if unchanged
   if (g_volume_loaded && volume_db == g_volume_db) {
     return ESP_OK;
   }
 
   audio_output_set_target_volume_db(volume_db);
-
   g_volume_db = volume_db;
   g_volume_loaded = true;
   return ESP_OK;
@@ -140,8 +134,7 @@ esp_err_t settings_get_wifi_password(char *password, size_t len) {
   return err;
 }
 
-esp_err_t settings_set_wifi_credentials(const char *ssid,
-                                        const char *password) {
+esp_err_t settings_set_wifi_credentials(const char *ssid, const char *password) {
   if (!ssid || strlen(ssid) == 0 || strlen(ssid) > MAX_WIFI_SSID_LEN) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -234,7 +227,6 @@ esp_err_t settings_get_device_name(char *name, size_t len) {
     }
   }
 
-  // Return default if not found or error
   strncpy(name, SETTINGS_DEFAULT_DEVICE_NAME, len - 1);
   name[len - 1] = '\0';
   return ESP_OK;

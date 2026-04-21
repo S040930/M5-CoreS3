@@ -4,13 +4,46 @@
 #include "iot_board.h"
 #include "network/mdns_airplay.h"
 #include "receiver_state.h"
+#include "screen_ui.h"
 #include "rtsp/rtsp_events.h"
 #include "rtsp/rtsp_server.h"
+#include <string.h>
 
 static bool s_registered = false;
 static bool s_board_ready = false;
 static bool s_infra_ready = false;
 static bool s_started = false;
+
+static screen_ui_state_t map_screen_state(receiver_state_t state) {
+  switch (state) {
+  case RECEIVER_STATE_BOOT:
+    return SCREEN_UI_STATE_BOOT;
+  case RECEIVER_STATE_CONFIG_REQUIRED:
+    return SCREEN_UI_STATE_CONFIG_REQUIRED;
+  case RECEIVER_STATE_NETWORK_READY:
+    return SCREEN_UI_STATE_NETWORK_READY;
+  case RECEIVER_STATE_DISCOVERABLE:
+    return SCREEN_UI_STATE_DISCOVERABLE;
+  case RECEIVER_STATE_SESSION_ESTABLISHING:
+    return SCREEN_UI_STATE_SESSION_ESTABLISHING;
+  case RECEIVER_STATE_STREAMING:
+    return SCREEN_UI_STATE_STREAMING;
+  case RECEIVER_STATE_RECOVERING:
+    return SCREEN_UI_STATE_RECOVERING;
+  case RECEIVER_STATE_FAULT:
+  default:
+    return SCREEN_UI_STATE_FAULT;
+  }
+}
+
+static void push_screen_state_from_receiver(void) {
+  receiver_state_snapshot_t snapshot;
+  receiver_state_get_snapshot(&snapshot);
+  screen_ui_set_state(
+      map_screen_state(snapshot.state), snapshot.network_ready,
+      snapshot.discoverable || snapshot.session_establishing || snapshot.streaming,
+      snapshot.streaming);
+}
 
 static esp_err_t ensure_board_ready(void) {
   if (s_board_ready) {
@@ -48,8 +81,18 @@ static void on_airplay_event(rtsp_event_t event, const rtsp_event_data_t *data,
     receiver_state_set_discoverable(true);
     break;
   case RTSP_EVENT_METADATA:
+    if (data != NULL) {
+      screen_ui_metadata_t ui_meta = {0};
+      memcpy(ui_meta.title, data->metadata.title, sizeof(ui_meta.title) - 1);
+      memcpy(ui_meta.artist, data->metadata.artist, sizeof(ui_meta.artist) - 1);
+      ui_meta.position_secs = data->metadata.position_secs;
+      ui_meta.duration_secs = data->metadata.duration_secs;
+      ui_meta.has_progress = data->metadata.duration_secs > 0;
+      screen_ui_set_metadata(&ui_meta);
+    }
     break;
   }
+  push_screen_state_from_receiver();
 }
 
 esp_err_t airplay_service_start(void) {

@@ -44,6 +44,13 @@ static uint8_t *s_ctrl_packet_buf;
 
 static const char *TAG = "audio_rt";
 
+static void log_stack_watermark(const char *task_name) {
+  UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+  ESP_LOGI(TAG, "stack watermark[%s]: free_words=%lu free_bytes=%lu",
+           task_name, (unsigned long)watermark,
+           (unsigned long)(watermark * sizeof(StackType_t)));
+}
+
 esp_err_t audio_realtime_preallocate(void) {
   if (!s_recv_task_stack) {
     s_recv_task_stack = heap_caps_malloc(AUDIO_RECV_STACK_SIZE,
@@ -241,6 +248,7 @@ static bool realtime_receive_packet(audio_stream_t *stream, uint8_t *packet,
 static void receiver_task(void *pvParameters) {
   audio_stream_t *stream = (audio_stream_t *)pvParameters;
   audio_receiver_state_t *state = audio_stream_state(stream);
+  int64_t last_stack_log_us = esp_timer_get_time();
 
   if (!s_recv_packet_buf) {
     s_recv_packet_buf =
@@ -264,9 +272,16 @@ static void receiver_task(void *pvParameters) {
     if (!realtime_receive_packet(stream, packet, &src_addr, &addr_len)) {
       break;
     }
+
+    int64_t now_us = esp_timer_get_time();
+    if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+      log_stack_watermark("audio_recv");
+      last_stack_log_us = now_us;
+    }
   }
 
   state->task_handle = NULL;
+  log_stack_watermark("audio_recv_exit");
   vTaskDelete(NULL);
 }
 
@@ -285,6 +300,7 @@ static uint32_t nctoh32(const uint8_t *data) {
 static void control_receiver_task(void *pvParameters) {
   audio_stream_t *stream = (audio_stream_t *)pvParameters;
   audio_receiver_state_t *state = audio_stream_state(stream);
+  int64_t last_stack_log_us = esp_timer_get_time();
 
   if (!s_ctrl_packet_buf) {
     s_ctrl_packet_buf =
@@ -340,7 +356,7 @@ static void control_receiver_task(void *pvParameters) {
         uint64_t ntp_frac = nctoh32(packet + 12);
         uint64_t network_time_ns =
             (ntp_secs * 1000000000ULL) + ((ntp_frac * 1000000000ULL) >> 32);
-        ESP_LOGI(TAG,
+        ESP_LOGD(TAG,
                  "AirPlay v1 sync packet: type=0x%02X rtp=%" PRIu32
                  " ntp_secs=%" PRIu64,
                  packet_type, rtp_timestamp, ntp_secs);
@@ -387,9 +403,16 @@ static void control_receiver_task(void *pvParameters) {
       }
       break;
     }
+
+    int64_t now_us = esp_timer_get_time();
+    if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+      log_stack_watermark("ctrl_recv");
+      last_stack_log_us = now_us;
+    }
   }
 
   state->control_task_handle = NULL;
+  log_stack_watermark("ctrl_recv_exit");
   vTaskDelete(NULL);
 }
 

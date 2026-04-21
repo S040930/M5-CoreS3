@@ -91,6 +91,34 @@ static void update_timing_targets(audio_timing_t *timing,
   if (target_frames < MIN_STARTUP_FRAMES) {
     target_frames = MIN_STARTUP_FRAMES;
   }
+
+  // Guard against impossible startup targets: if target startup latency asks
+  // for more frames than the ring buffer can ever hold, playback would never
+  // start and the output path would stay in zero-read silence.
+  int max_buffer_frames =
+      (CONFIG_AUDIO_MAX_BUFFER_MS * format->sample_rate) /
+      (1000 * (int)timing->nominal_frame_samples);
+  if ((CONFIG_AUDIO_MAX_BUFFER_MS * format->sample_rate) %
+          (1000 * (int)timing->nominal_frame_samples) !=
+      0) {
+    max_buffer_frames++;
+  }
+  if (max_buffer_frames < MIN_STARTUP_FRAMES) {
+    max_buffer_frames = MIN_STARTUP_FRAMES;
+  }
+  if (target_frames >= (uint32_t)max_buffer_frames) {
+    uint32_t clamped =
+        (max_buffer_frames > MIN_STARTUP_FRAMES)
+            ? (uint32_t)(max_buffer_frames - 1)
+            : (uint32_t)MIN_STARTUP_FRAMES;
+    ESP_LOGW(TAG,
+             "target startup frames clamped: requested=%" PRIu32
+             " max_buffer=%d (latency_ms=%" PRIu32 ", max_buffer_ms=%d)",
+             target_frames, max_buffer_frames, CONFIG_AUDIO_TARGET_LATENCY_MS,
+             CONFIG_AUDIO_MAX_BUFFER_MS);
+    target_frames = clamped;
+  }
+
   timing->target_buffer_frames = target_frames;
 }
 

@@ -41,6 +41,7 @@ typedef struct __attribute__((packed)) {
 #define TIMING_INTERVAL_MS  3000 // Send request every 3 seconds
 
 #define NTP_STACK_SIZE 3072
+#define STACK_LOG_INTERVAL_US 15000000LL
 
 static StaticTask_t s_ntp_tcb;
 static StackType_t s_ntp_stack[NTP_STACK_SIZE / sizeof(StackType_t)];
@@ -66,6 +67,13 @@ static struct {
   int reject_streak;
   int64_t last_accept_us;
 } ntp = {0};
+
+static void log_stack_watermark(const char *reason) {
+  UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+  ESP_LOGI(TAG, "stack watermark[%s]: free_words=%lu free_bytes=%lu",
+           reason, (unsigned long)watermark,
+           (unsigned long)(watermark * sizeof(StackType_t)));
+}
 
 static void accept_measurement(int64_t offset_ns, int64_t dispersion_ns) {
   int idx = ntp.measurement_index;
@@ -256,9 +264,11 @@ static void send_timing_request(void) {
 
 // Timing task: sends requests and processes responses
 static void ntp_task(void *pvParameters) {
+  (void)pvParameters;
   uint8_t packet[64];
   struct sockaddr_in src_addr;
   socklen_t addr_len;
+  int64_t last_stack_log_us = esp_timer_get_time();
 
   // Initial delay before first request
   vTaskDelay(pdMS_TO_TICKS(300));
@@ -295,9 +305,16 @@ static void ntp_task(void *pvParameters) {
         process_timing_response(packet, len);
       }
     }
+
+    int64_t now_us = esp_timer_get_time();
+    if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+      log_stack_watermark("ntp_clock");
+      last_stack_log_us = now_us;
+    }
   }
 
   ntp.task_handle = NULL;
+  log_stack_watermark("ntp_clock_exit");
   vTaskDelete(NULL);
 }
 

@@ -16,6 +16,7 @@ cd "$PROJECT_DIR"
 
 # Submodule paths to exclude
 SUBMODULES="components/u8g2"
+INACTIVE_COMPONENTS=""
 
 export PATH="$(brew --prefix llvm)/bin:$PATH"
 
@@ -47,8 +48,11 @@ EXCLUDE_ARGS=()
 for sm in $SUBMODULES; do
   EXCLUDE_ARGS+=(-path "$sm" -prune -o)
 done
+for inactive in $INACTIVE_COMPONENTS; do
+  EXCLUDE_ARGS+=(-path "$inactive" -prune -o)
+done
 
-# Find all C source files in main/ and components/, excluding submodules and generated trees
+# Find all C source files in main/ and the active product components.
 SOURCES=$(find main components "${EXCLUDE_ARGS[@]}" \
   -path "*/managed_components" -prune -o \
   -path "*/.pio" -prune -o \

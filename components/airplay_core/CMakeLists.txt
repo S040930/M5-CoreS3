@@ -19,6 +19,8 @@ idf_component_register(
     REQUIRES
         audio_core
         network_core
+        board_cores3
+        screen_ui
         json
         mbedtls
         esp_timer
