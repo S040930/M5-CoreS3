@@ -152,9 +152,17 @@ esp_err_t audio_buffer_init(audio_buffer_t *buffer) {
     return ESP_ERR_NO_MEM;
   }
 
-  /* Sorted index array + free stack (internal RAM is fine, they're small) */
-  buffer->sorted = (uint16_t *)malloc(buffer->capacity * sizeof(uint16_t));
-  buffer->free_stack = (uint16_t *)malloc(buffer->capacity * sizeof(uint16_t));
+  /* Sorted index array + free stack — prefer PSRAM to save internal DRAM */
+  buffer->sorted = (uint16_t *)heap_caps_malloc(buffer->capacity * sizeof(uint16_t),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buffer->sorted) {
+    buffer->sorted = (uint16_t *)malloc(buffer->capacity * sizeof(uint16_t));
+  }
+  buffer->free_stack = (uint16_t *)heap_caps_malloc(buffer->capacity * sizeof(uint16_t),
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buffer->free_stack) {
+    buffer->free_stack = (uint16_t *)malloc(buffer->capacity * sizeof(uint16_t));
+  }
   if (!buffer->sorted || !buffer->free_stack) {
     ESP_LOGE(TAG, "Failed to allocate index arrays");
     audio_buffer_deinit(buffer);
@@ -175,11 +183,16 @@ esp_err_t audio_buffer_init(audio_buffer_t *buffer) {
     return ESP_ERR_NO_MEM;
   }
 
-  /* Temp assembly / decode buffer (same as before) */
+  /* Temp assembly / decode buffer — prefer PSRAM */
   size_t max_pcm_bytes =
       (size_t)MAX_SAMPLES_PER_FRAME * AUDIO_MAX_CHANNELS * sizeof(int16_t);
   buffer->frame_buffer =
-      (uint8_t *)malloc(sizeof(audio_frame_header_t) + max_pcm_bytes);
+      (uint8_t *)heap_caps_malloc(sizeof(audio_frame_header_t) + max_pcm_bytes,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buffer->frame_buffer) {
+    buffer->frame_buffer =
+        (uint8_t *)malloc(sizeof(audio_frame_header_t) + max_pcm_bytes);
+  }
   if (!buffer->frame_buffer) {
     ESP_LOGE(TAG, "Failed to allocate frame buffer");
     audio_buffer_deinit(buffer);

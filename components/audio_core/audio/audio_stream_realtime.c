@@ -17,8 +17,8 @@
 #include "network/socket_utils.h"
 
 #define RTP_HEADER_SIZE         12
-#define AUDIO_RECV_STACK_SIZE   12288
-#define AUDIO_CTRL_STACK_SIZE   4096
+#define AUDIO_RECV_STACK_SIZE   8192
+#define AUDIO_CTRL_STACK_SIZE   3072
 #define STACK_LOG_INTERVAL_US   5000000
 #define RESEND_ERROR_BACKOFF_US 100000 // 100ms backoff after sendto failure
 #define MAX_RESEND_GAP          100 // Don't request retransmit for gaps > 100
@@ -53,19 +53,28 @@ static void log_stack_watermark(const char *task_name) {
 
 esp_err_t audio_realtime_preallocate(void) {
   if (!s_recv_task_stack) {
+    /* Prefer PSRAM for task stacks to conserve internal DRAM */
     s_recv_task_stack = heap_caps_malloc(AUDIO_RECV_STACK_SIZE,
-                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_recv_task_stack) {
+      s_recv_task_stack = heap_caps_malloc(AUDIO_RECV_STACK_SIZE,
+                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
   }
   if (!s_ctrl_task_stack) {
     s_ctrl_task_stack = heap_caps_malloc(AUDIO_CTRL_STACK_SIZE,
-                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_ctrl_task_stack) {
+      s_ctrl_task_stack = heap_caps_malloc(AUDIO_CTRL_STACK_SIZE,
+                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
   }
   if (!s_recv_task_stack || !s_ctrl_task_stack) {
     ESP_LOGE(TAG, "Failed to pre-allocate audio stacks (need %d+%d bytes)",
              AUDIO_RECV_STACK_SIZE, AUDIO_CTRL_STACK_SIZE);
     return ESP_ERR_NO_MEM;
   }
-  ESP_LOGI(TAG, "Pre-allocated audio stacks (%d+%d bytes from internal heap)",
+  ESP_LOGI(TAG, "Pre-allocated audio stacks (%d+%d bytes)",
            AUDIO_RECV_STACK_SIZE, AUDIO_CTRL_STACK_SIZE);
   return ESP_OK;
 }

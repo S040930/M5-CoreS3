@@ -265,7 +265,11 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   timing->post_flush_ntp_offset_ns = 0;
 
   if (pending_capacity > 0) {
-    timing->pending_frame = (uint8_t *)malloc(pending_capacity);
+    timing->pending_frame = (uint8_t *)heap_caps_malloc(pending_capacity,
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!timing->pending_frame) {
+      timing->pending_frame = (uint8_t *)malloc(pending_capacity);
+    }
     if (timing->pending_frame) {
       timing->pending_frame_capacity = pending_capacity;
     }

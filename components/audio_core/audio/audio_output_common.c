@@ -100,23 +100,24 @@ static void apply_concealment_fade(int16_t *buf, size_t sample_count,
   }
 }
 
+/* Maximum possible resampled frames: 48000/44100 ratio with headroom.
+ * Computed as a plain constant so it can be used for static arrays. */
+#define PLAYBACK_RESAMPLE_BUF_FRAMES 400
+
 static void playback_task(void *arg) {
-  int16_t *pcm = malloc((size_t)(AO_FRAME_SAMPLES + 1) * 2 * sizeof(int16_t));
-  int16_t *silence = calloc((size_t)AO_FRAME_SAMPLES * 2, sizeof(int16_t));
-  int16_t *resample_buf = malloc(AO_MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t));
-  int16_t *last_good_buf = calloc((size_t)AO_MAX_RESAMPLE_FRAMES * 2,
-                                  sizeof(int16_t));
-  if (!pcm || !silence || !resample_buf) {
-    ESP_LOGE(TAG, "Failed to allocate buffers");
-    free(pcm);
-    free(silence);
-    free(resample_buf);
-    free(last_good_buf);
-    playback_running = false;
-    playback_task_handle = NULL;
-    vTaskDelete(NULL);
-    return;
-  }
+  /* Static buffers eliminate heap fragmentation and save ~8KB DRAM */
+  static int16_t s_pcm_buf[(AO_FRAME_SAMPLES + 1) * 2];
+  static int16_t s_silence_buf[AO_FRAME_SAMPLES * 2];
+  static int16_t s_resample_buf[PLAYBACK_RESAMPLE_BUF_FRAMES * 2];
+  static int16_t s_last_good_buf[PLAYBACK_RESAMPLE_BUF_FRAMES * 2];
+
+  int16_t *pcm = s_pcm_buf;
+  int16_t *silence = s_silence_buf;
+  int16_t *resample_buf = s_resample_buf;
+  int16_t *last_good_buf = s_last_good_buf;
+
+  memset(silence, 0, sizeof(s_silence_buf));
+  memset(last_good_buf, 0, sizeof(s_last_good_buf));
 
   audio_eq_init((uint32_t)AO_OUTPUT_RATE);
   audio_dsp_init((uint32_t)AO_OUTPUT_RATE);
@@ -273,10 +274,6 @@ static void playback_task(void *arg) {
     }
   }
 
-  free(pcm);
-  free(silence);
-  free(resample_buf);
-  free(last_good_buf);
   playback_running = false;
   playback_task_handle = NULL;
   log_stack_watermark("audio_play_exit");
@@ -300,7 +297,7 @@ void audio_output_common_start(void) {
   playback_running = true;
   const char *name = (s_ops && s_ops->task_name) ? s_ops->task_name
                                                   : "audio_play";
-  xTaskCreatePinnedToCore(playback_task, name, 4096, NULL, 7,
+  xTaskCreatePinnedToCore(playback_task, name, 3584, NULL, 7,
                           &playback_task_handle, AO_PLAYBACK_CORE);
 }
 
