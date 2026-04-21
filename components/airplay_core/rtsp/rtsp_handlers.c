@@ -1173,12 +1173,14 @@ static void handle_set_parameter(int socket, rtsp_conn_t *conn,
 
   if (has_metadata) {
     rtsp_events_emit(RTSP_EVENT_METADATA, &event_data);
-    if (event_data.metadata.has_artwork && event_data.metadata.artwork_data) {
-      free(event_data.metadata.artwork_data);
-      event_data.metadata.artwork_data = NULL;
-      event_data.metadata.artwork_len = 0;
-      event_data.metadata.has_artwork = false;
-    }
+  }
+
+  // Always free artwork data if allocated
+  if (event_data.metadata.has_artwork && event_data.metadata.artwork_data) {
+    free(event_data.metadata.artwork_data);
+    event_data.metadata.artwork_data = NULL;
+    event_data.metadata.artwork_len = 0;
+    event_data.metadata.has_artwork = false;
   }
 
   rtsp_send_ok(socket, conn, req->cseq);
