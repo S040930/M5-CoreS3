@@ -19,4 +19,5 @@ if command -v rg >/dev/null 2>&1; then
 fi
 
 echo "Running quick baseline build for m5cores3..."
+export IDF_COMPONENT_SUPPRESS_UNKNOWN_FILE_WARNINGS=1
 ~/.platformio/penv/bin/pio run -e m5cores3

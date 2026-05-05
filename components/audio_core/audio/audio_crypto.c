@@ -82,6 +82,32 @@ int audio_crypto_decrypt_rtp(const audio_encrypt_t *encrypt,
       memcpy(output + encrypted_len, input + encrypted_len, remainder);
     }
 
+    // 诊断：检查解密后的 payload 是否非零
+    // 对前 32 个字节（16 个 int16 样本）计算峰值
+    if (input_len >= 32) {
+      int16_t payload_peak = 0;
+      const int16_t *samples = (const int16_t *)output;
+      size_t sample_count = input_len / sizeof(int16_t);
+      size_t diag_count = sample_count > 16 ? 16 : sample_count;
+      
+      for (size_t i = 0; i < diag_count; i++) {
+        int32_t v = samples[i];
+        int32_t mag = v < 0 ? -v : v;
+        if (mag > 32767) mag = 32767;
+        if ((int16_t)mag > payload_peak) {
+          payload_peak = (int16_t)mag;
+        }
+      }
+      
+      if (payload_peak == 0) {
+        static uint32_t silent_decrypt_counter = 0;
+        if (++silent_decrypt_counter % 50 == 0) {
+          ESP_LOGW(TAG, "crypto_diag: decrypted payload_peak=0 len=%zu samples=%zu count=%lu",
+                   input_len, sample_count, (unsigned long)silent_decrypt_counter);
+        }
+      }
+    }
+
     return (int)input_len;
   }
 

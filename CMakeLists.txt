@@ -31,4 +31,8 @@ else()
 	message(FATAL_ERROR "ESP-IDF not found. Set IDF_PATH (CMake variable or environment variable), or install ESP-IDF via PlatformIO at ~/.platformio/packages/framework-espidf.")
 endif()
 
+set(SDKCONFIG_DEFAULTS
+    ${CMAKE_SOURCE_DIR}/config/generated/sdkconfig.defaults
+)
+
 project(cores3_airplay_core VERSION ${PROJECT_VER})

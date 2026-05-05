@@ -9,6 +9,7 @@ typedef void *board_res_handle_t;
 typedef enum {
   NULL_RESOURCE = 0,
   BOARD_AUDIO_SPK_ID, ///< Audio output device used by the speaker path
+  BOARD_AUDIO_MIC_ID, ///< Audio input device used by the microphone path
 } board_res_id_t;
 
 /**

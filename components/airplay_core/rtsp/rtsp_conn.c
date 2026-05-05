@@ -5,23 +5,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "settings.h"
+#include "audio_volume.h"
 
 static int32_t volume_db_to_q15(float volume_db) {
-  if (volume_db <= -30.0f) {
-    return 0;
-  }
-  if (volume_db >= 0.0f) {
-    return 32768;
-  }
-  float linear = powf(10.0f, volume_db / 20.0f);
-  if (linear < 0.0f) {
-    linear = 0.0f;
-  }
-  if (linear > 1.0f) {
-    linear = 1.0f;
-  }
-  return (int32_t)(linear * 32768.0f);
+  return audio_volume_db_to_q15(volume_db);
 }
 
 rtsp_conn_t *rtsp_conn_create(void) {
@@ -32,7 +19,7 @@ rtsp_conn_t *rtsp_conn_create(void) {
 
   // Load saved volume or use default
   float saved_volume;
-  if (settings_get_volume(&saved_volume) == ESP_OK) {
+  if (audio_volume_load(&saved_volume) == ESP_OK) {
     conn->volume_db = saved_volume;
     conn->volume_q15 = volume_db_to_q15(saved_volume);
   } else {
@@ -53,8 +40,7 @@ void rtsp_conn_free(rtsp_conn_t *conn) {
     return;
   }
 
-  // Persist volume at disconnect
-  settings_persist_volume();
+  audio_volume_persist();
 
   // Cleanup any resources
   rtsp_conn_cleanup(conn);
@@ -118,7 +104,7 @@ void rtsp_conn_set_volume(rtsp_conn_t *conn, float volume_db) {
 
   conn->volume_db = volume_db;
   conn->volume_q15 = volume_db_to_q15(volume_db);
-  settings_set_volume(volume_db);
+  audio_volume_save(volume_db);
 }
 
 int32_t rtsp_conn_get_volume_q15(rtsp_conn_t *conn) {

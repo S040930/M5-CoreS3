@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "network/wifi.c"
+        "network/wifi_credentials.c"
         "network/mdns_airplay.c"
         "network/ntp_clock.c"
         "network/socket_utils.c"
@@ -13,8 +14,7 @@ idf_component_register(
         esp_timer
         esp_wifi
         mdns
+        nvs_flash
 )
 
-target_include_directories(${COMPONENT_LIB} PRIVATE
-    "${PROJECT_DIR}/components/app_core"
-)
+# ── Removed: target_include_directories for app_core (layering: Layer 2 → Layer 4 violation)

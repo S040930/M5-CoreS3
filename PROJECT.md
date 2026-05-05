@@ -1,0 +1,112 @@
+# PROJECT.md
+
+## Core Scope
+M5Stack CoreS3 双模固件：AirPlay 1 接收播放 + 最小可成功语音助手。语音链路为本地 ESP-SR AFE/WakeNet(`Hi ESP`)/VAD 唤醒切段，随后通过 DashScope OpenAI-compatible Chat Completions 调用 `qwen3.5-omni-flash` 做一次性音频理解并显示短文本回复。AirPlay `output_active=1` 时语音前端停跑，稳定性优先于并行语音。
+
+## Recent Changes
+- 2026-05-05: **Voice 最小可成功版（Qwen3.5-Omni-Flash 一次性问答）**: 保留本地 AFE/WakeNet/VAD，`realtime_voice` 兼容外壳不再建立 realtime WebSocket；唤醒后录制最多 5 秒 16 kHz PCM，`voice_request` 打包 WAV/base64 后调用 DashScope OpenAI-compatible Chat Completions `qwen3.5-omni-flash` 获取短文本回复。AirPlay `output_active` 仍作为语音禁麦门控。`network_monitor` task 创建失败不再把 receiver 标成 fault，避免因监控任务 OOM 阻断最小语音链路。
+- 2026-05-05: **voice_fe 根治性防自旋重构**: `voice_frontend` 引入内部状态机（`FE_STATE_STOPPED/STARTING/RUNNING/STOPPING/BLOCKED`）、fetch 批次上限与时间预算（`max_fetch_per_tick` + `max_fetch_budget_us`）、spin guard 计数与周期性 `afe_bridge_reset()` 防护，新增 `loop_hz / yield_progress / yield_no_progress / wdt_prevent_counter` 健康指标，`realtime_voice` 告警透传上述指标用于现场稳定性判定。
+- 2026-05-05: **AirPlay/Voice互斥门控切换**: `realtime_voice` 新增运行态 gate（`VOICE_GATE_OPEN` / `VOICE_GATE_BLOCKED_BY_AIRPLAY`），以 `audio_output_is_active()`（对应 `output_active`）作为唯一判定。AirPlay 输出活跃时停止 `voice_frontend` task 并暂停 AFE feed/fetch；输出空闲时自动恢复 `voice_frontend`。门控边沿日志改为 `voice gate -> blocked_by_airplay/open`，用于替代高频 AFE empty 刷屏定位。
+- 2026-05-05: **Voice path simplification**: retained mandatory ESP-SR **AFE** as the only front-end, removed `server VAD` / turn-mode switching, and collapsed voice UI/state handling to the main path (`standby / connecting / listening / sending / thinking / speaking / error`) so the success-critical behavior stays intact while the branching surface shrinks.
+- 2026-05-05: **Voice / AirPlay ducking + AFE-only + playout modularization**: AirPlay streaming no longer tears down the voice task; mic/WebSocket stay up while music plays; assistant replies acquire the speaker per response; `audio_output_set_ref_tap()` feeds AirPlay PCM into the AEC reference ring alongside Omni playout. Standalone `wakeword_omi` and RMS client VAD are removed — ESP-SR **AFE** (WakeNet + VADNet + AEC) is mandatory. Legacy “TTS” ring naming moved to **`voice_playout`** (`VOICE_PLAYOUT_PREFILL_MS` default **150** ms) with optional **`playout ttfb_ms`** log on first `response.audio.delta`. Expanded tools: `get_time`, `get_date`, `get_network_status`, `set_screen_brightness`, `play_local_chime`, `airplay_status`. Docs: `docs/voice-interaction.md`, ADR [`docs/adr/adr-005-voice-airplay-ducking.md`](docs/adr/adr-005-voice-airplay-ducking.md).
+- 2026-05-05: **Omni 原生全模态语音助手重做**: 主链路收敛为 “WakeNet -> client VAD -> Omni Realtime 原生音频输入 -> 音频输出”；前置 ASR 配置、NVS 入口、构建映射与运行时依赖全部移除，用户转写改由可选 realtime transcript 事件承担。
+- 2026-05-05: **本地 WakeNet Hi ESP bring-up**: 语音激活收敛为本地 WakeNet 专用唤醒；新增 `wakeword_omi` 封装并切到现成模型 `wn9_hiesp` 做 bring-up，未 armed 时不发 Omni 事件；`Hi Omi` 继续保留为后续自定义模型目标。
+- 2026-05-05: **语音管线收口**: 旧的 HTTP 转写管线、NVS 入口和构建映射已移除；用户转写若需要，仅通过 Omni Realtime 的可选 transcript 事件提供。
+- 2026-05-05: **AirPlay / Realtime Voice 统一仲裁 gate**: `airplay_service_is_active()` 成为 AirPlay 会话占用资源的单一查询入口（`session_establishing || streaming`）；`realtime_voice` 通过统一 `airplay_gate_active()` 短路 voice loop、speaker acquire、PTT、上行音频与迟到 TTS delta；AirPlay 边沿回调只置位和记录日志，资源释放集中回到 voice task 执行，避免 RTSP 回调链路直接操作 WebSocket / codec。
+- 2026-05-05: **Realtime Voice 原生音频会话收口**: `session.update` 继续保留 `text/audio` modalities 与 `pcm` 输入/输出格式；client VAD 负责切段，`input_audio_buffer.append` / `commit` 直接驱动 Omni 回答，`response.audio_transcript.*` 与可选 `conversation.item.input_audio_transcription.completed` 仅用于 UI 文本。
+- 2026-05-04: **Realtime Voice playback heap-stability follow-up**: `config/config.toml` now explicitly pins `voice.output_sample_rate=24000` and raises the real client-VAD source threshold to `180`; playback resampler output buffers now use a conservative upper bound instead of a tight expected-size allocation, reducing first-`response.audio.delta` heap corruption risk.
+- 2026-05-04: **Realtime Voice 上行稳连接治理**: 客户端 VAD 默认阈值提升到 `180`；待机监听新增本地连续 `3` 帧命中 gate，避免环境噪声单帧越线就持续 `input_audio_buffer.append`；WebSocket 写失败/断连前新增聚合诊断日志，记录最近发送事件类型、append 计数与状态机快照，用于定位 `transport_poll_write` 超时。
+- 2026-05-04: **Realtime Voice 播放期回声误打断修复**: 播放期间普通 mic RMS 一律视为扬声器回声，不再触发 `response.cancel`；仅显式打断允许中断播放；cancel 后标记当前 response audio closed/cancelled，避免迟到 `response.audio.delta` 重新打开 codec。
+- 2026-05-04: **Voice volume control tools**: enabled DashScope Realtime function calling in `config.toml`; added `set_volume` / `get_volume` tools so spoken requests like "音量大一点", "调到 80%", "静音" and "取消静音" adjust the local speaker through the existing `audio_volume` / NVS path; documented the shared `-30.0 dB..0.0 dB` percent mapping.
+- 2026-05-04: **Realtime Voice 扬声器音量与断续修复**:
+  - CoreS3 speaker `force=true` 音量应用改为直接跳到目标 dB，不再只走一个 1.5 dB ramp step，避免 voice boost 后仍停在低硬件音量。
+  - 播放期回声抑制阈值提高到 `max(CONFIG_VOICE_VAD_RMS_THRESHOLD * 12, 1200)`，防止 speaker 回灌被误判为真实打断并切碎 assistant 回复。
+  - Voice 播放新增 volume diag 与 PCM peak / clip-risk 日志，用于继续定位是否存在 PCM 削波或硬件链路爆音。
+- 2026-05-04: **AirPlay / Realtime Voice 扬声器仲裁（PLAN5）**:
+  - `airplay_service_set_active_callback()`：在 `RTSP_EVENT_CLIENT_CONNECTED` / `PLAYING` / `PAUSED` 上通知 `active=true`，在 `DISCONNECTED` 与 `airplay_service_stop()` 上通知 `false`，不依赖 `app_core` 2 秒轮询即可把 gate 交给 voice。
+  - `app_core` 在 `start_airplay_services()` 成功路径注册回调，仍保留 `reconcile_voice_mode()` 作兜底纠偏。
+  - `realtime_voice_on_airplay_state_changed()`：边沿触发时打 `AirPlay active: voice yielding resources` / `AirPlay inactive: voice can resume listening`；仅在首次进入 AirPlay active 时 `send_response_cancel()`；`speaker_acquire` 在 `airplay_active` 时直接失败并限频 `voice speaker acquire skipped: airplay active`；standby 分支区分 `voice standby: airplay active`、AirPlay gate 下 10ms 轮询；WebSocket 路径忽略 `input_audio_buffer.speech_started` 与 `response.audio.delta`；`send_audio_frame` / `realtime_voice_notify_user_speech_start` 在 gate 下短路。
+  - `sync_playback_worker()`：若外部 speaker owner 非空则跳过 `audio_pipeline_start` 并打 `speaker owner[pipeline_start_blocked]: external=1 owner=...`。
+  - `sedentary_alert_play()`：AirPlay session 或 voice 回复进行中时拒绝 acquire speaker。
+  - 验证：`bash scripts/check-fast.sh`，`~/.platformio/penv/bin/pio run`。
+- 2026-05-03: **AirPlay 无声问题深度诊断与 voice/AirPlay 资源仲裁修正**:
+  - Realtime voice 仲裁 bug 修正：`should_run_voice()` 现在明确检查 `airplay_active`，AirPlay 会话建立后立即返回 false，确保 voice task 在下一个循环中退出 active loop、关闭麦克风、断开 WebSocket。
+  - 音频解密诊断强化：`audio_crypto_decrypt_rtp()` 现在在 AES-CBC 解密成功后计算 payload peak，长期为零时每 50 帧打一次告警 `crypto_diag: decrypted payload_peak=0`。
+  - 音频解码诊断强化：`audio_decoder_decode()` 对 ALAC/AAC 解码成功后的 PCM 计算 peak，长期为零时每 50 帧打一次告警 `decoder_diag: ALAC/AAC decoded silent PCM pcm_peak=0`。
+  - 入队诊断强化：`audio_stream_process_frame()` 在入队前计算帧 peak，静音帧每 50 帧记一次 `stream_diag: silent frame before queue`。
+  - 输出诊断强化：`audio_output_common` 的 playback_task 对真实帧输出添加 `source=real` 标记；gap concealment 分支首次进入时打告警，silence fill 时记录 buffer/anchor 状态。
+  - RTSP ANNOUNCE 参数摘要：`rtsp_parse_sdp()` 完成后打印完整的 codec/sr/ch/bits/encrypt 参数及 frame_size/max_samples，便于快速验证配置。
+  - 文档更新：`docs/voice-interaction.md` 补充 AirPlay preemption 详细说明，确保 voice 必须真正退出而非仅释放 speaker；`docs/audio-fidelity-qa.md` 新增"AirPlay Silent Playback Diagnosis"指南，明确诊断步骤与日志对应。
+- 2026-05-03: AirPlay runtime diagnostics and startup gating hardened for "discoverable but unusable" cases: startup now requires both mDNS publish and confirmed RTSP listen on 7000 before reporting ready; RTSP task startup failures are surfaced immediately; mDNS is rolled back when RTSP fails; AirPlay event/playback state logs now include receiver state + desired/running/output-active and external speaker owner tag diagnostics.
+- 2026-05-03: Optional **sedentary desk monitor** (`CONFIG_SEDENTARY_ENABLE`): GC0308 grayscale QQVGA → local baseline/ROI occupancy + NVS two-step calibration option → configurable timers; on-screen reminder default **`stand up`**; no cloud vision; reminder defers under AirPlay or active realtime voice response. See `docs/sedentary-monitor.md`.
+- 2026-05-03: Optional DashScope Realtime **function calling** (`CONFIG_VOICE_TOOLS_ENABLE` / `voice.tools.enabled`): `session.update` registers `set_timer`, `cancel_timer`, `get_device_status`; handles `response.function_call_arguments.done`, replies with `conversation.item.create` + follow-up `response.create`; relative `esp_timer` timers with UI/log on fire. See `docs/voice-interaction.md`.
+- 2026-05-03: Realtime voice playback now keeps a single assistant-turn speaker lifecycle, ignores late audio deltas after `response.audio.done`, and temporarily boosts speaker gain during voice playback before restoring the prior AirPlay volume.
+- 2026-05-03: Voice activation now runs in continuous listen mode only, so the device waits for the wake phrase without requiring a tap; tap-window has been removed.
+- 2026-05-03: Screen UI no longer opens a voice activation window on tap; realtime voice standby skip logging is reduced to a single state-entry line while waiting for network/gates.
+- 2026-05-03: Chinese wake matching accepts “嘿，欧米” and “嗨，欧米” as the same strict greeting-plus-name phrase, and the session disarms again after idle-timeout cleanup.
+- 2026-05-03: Realtime voice WebSocket message accumulation moved from a 2KB inline buffer to a 32KB SPIRAM-preferred buffer, preventing large `response.audio.delta` JSON/base64 frames from being truncated before playback.
+- 2026-05-03: Realtime voice session instructions now mirror the client-side Chinese wake phrase, so `response.create` after “嘿，欧米” is not blocked by the previous English-only `hi omni` silence rule; response.create send status is logged.
+- 2026-05-03: Realtime voice activation now accepts strict Chinese “嘿，欧米” transcripts (requires both “嘿” and “欧米”) while preserving English `hi omni` matching; client VAD RMS threshold restored to 80 for CoreS3 mic levels.
+- 2026-05-03: AirPlay front-panel UI removed from the main screen; voice overlay and voice states now own the visible UI, while AirPlay remains only as a background playback capability.
+- 2026-05-03: AirPlay playback worker changed to background-sleep mode: `airplay_service` now keeps RTSP/mDNS alive without starting the playback worker until actual RTSP `PLAYING`, and `realtime_voice` refreshes AirPlay playback after speaker ownership release so voice remains the highest-priority audio owner.
+- 2026-05-02: Realtime voice 修复执行：DashScope 默认模型设为 `qwen3.5-omni-flash-realtime`（成本优先），输入转写默认 `gummy-realtime-v1`；补充 `response.audio_transcript.*` 事件处理；输入/输出采样率拆分为 `CONFIG_VOICE_INPUT_SAMPLE_RATE`(16k) 与 `CONFIG_VOICE_OUTPUT_SAMPLE_RATE`(24k)；修复 `pio_prebuild.py` 读取 `PROJECT_DIR` 以确保 `config/config.toml` 生效链路稳定。
+- 2026-05-02: 移除 `wakeword_engine` / ESP-SR；语音激活改为 `CONFIG_VOICE_ACTIVATION_*`（转写短语 + CoreS3 连续监听）；`screen_ui` 曾短暂增加 standby / 点屏开窗入口，后续已删除。
+- 2026-05-01: 系统性重构完成 - 五层分层架构强化、跨层依赖清零、rtsp_handlers 模块化拆解、命名规范统一。
+- 2026-05-01: Realtime voice is now DashScope-only at the protocol boundary: Bearer auth only, no OpenAI Realtime beta header path, `session.update` uses DashScope `"pcm"` formats, and input transcription uses `CONFIG_VOICE_INPUT_TRANSCRIPTION_MODEL`.
+- 2026-05-01: CoreS3 realtime voice capture/playback now matches the board stereo I2S path with 384x MCLK, downmixing mic input to mono for uplink and upmixing assistant PCM to stereo for speaker output.
+- 2026-05-01: Mic capture recovery now uses bounded stall timeout, reopen retry, stall-cycle escalation, and cooldown; recovery success is logged only after a positive read frame.
+- 2026-05-01: Realtime voice WebSocket disconnect handling now tears down the stale client and re-enters the reconnect backoff loop, so `WEBSOCKET_EVENT_DISCONNECTED` no longer leaves the voice task stuck with a dead `s_ctx.ws`.
+- 2026-05-01: `input_audio_buffer.append` diagnostics now increment only after a successful send, which keeps uplink counters aligned with real network state.
+- 2026-05-01: WebSocket ping interval made effectively dormant for realtime voice (`CONFIG_VOICE_WS_PING_INTERVAL_SEC` default 3600) to avoid client-side keepalive writes colliding with continuous audio uplink.
+- 2026-04-30: `realtime_voice` 升级为持续会话助手架构；新增会话态（active/idle-timeout cleanup）、`response.cancel` 打断、prompt preset 注入、上下文内存上限与会话超时清理。
+- 2026-04-30: 语音模块从 `voice_core` 一次性 HTTP 上传链路重构为 `realtime_voice` WebSocket 实时会话链路；新增 AirPlay/Voice 双模仲裁，AirPlay 活跃时强制退出语音模式。
+- 2026-04-30: 修复 CoreS3 语音采集与 AirPlay 播放切换时的 I2S peer-mode 冲突；AirPlay stop 时显式释放 speaker codec 输出流，start 时按缓存采样率重新打开，并在 `mic_open()` 失败时增加一次延迟重试。
+- 2026-04-30: 清理语音开麦时的 I2S already-disabled 误报；本地 `esp_codec_dev` 在关闭未启用 channel 时将 `ESP_ERR_INVALID_STATE` 视为 no-op success。
+
+## Master Index (Table of Contents)
+- 五层分层架构与依赖规则
+  - Scope: 架构决策、组件分层、依赖规则、接口规范。
+  - File: `docs/adr/adr-001-layered-architecture.md`
+- 系统架构与模块边界
+  - Scope: 启动流程、组件职责、保留能力与移除能力。
+  - File: `docs/core-architecture.md`
+- 架构决策记录 (ADR)
+  - Scope: 关键技术决策的背景、理由和影响。
+  - Files:
+    - `docs/adr/adr-001-layered-architecture.md` — 五层分层架构与强制依赖规则
+    - `docs/adr/adr-002-pragma-once.md` — 统一 #pragma once 头文件保护
+    - `docs/adr/adr-003-context-struct-pattern.md` — 上下文结构体模式替代全局变量
+    - `docs/adr/adr-004-error-handling-strategy.md` — 统一错误处理策略与错误码体系
+- 构建、验证与质量门禁
+  - Scope: 本地构建、快速检查、lint 入口与验收命令。
+  - File: `docs/build-and-verify.md`
+- 音频听感与质量验收
+  - Scope: 听感评估流程、主观+客观联合验收标准。
+  - File: `docs/audio-fidelity-qa.md`
+- 屏幕 UI 迁移与维护
+  - Scope: 设计资产清点、映射关系、实现约束、测试标准、维护指南。
+  - File: `docs/ui/screen-ui-migration-plan.md`
+- 屏幕 UI 设计映射矩阵
+  - Scope: `m5-ui` 到 `components/screen_ui` 的逐项映射、容差、禁止偏移项。
+  - File: `docs/ui/screen-ui-mapping-matrix.md`
+- 屏幕 UI 验收规范
+  - Scope: 视觉一致性、状态流、性能稳定性、跨分辨率验证。
+  - File: `docs/ui/screen-ui-validation-spec.md`
+- 屏幕 UI 维护手册
+  - Scope: 参数调优流程、改动边界、回归清单。
+  - File: `docs/ui/screen-ui-maintenance-guide.md`
+- 屏幕 UI Token 规范
+  - Scope: 颜色/字号/动画等 token 与 RGB565 量化基线。
+  - File: `docs/ui/screen-ui-token-spec.md`
+- 语音交互集成
+  - Scope: 最小可成功语音路径、`realtime_voice` 兼容外壳、本地 WakeNet/VAD 切段、一次性 HTTP 音频问答、AirPlay 禁麦门控、配置项与验证步骤。
+  - File: `docs/voice-interaction.md`
+- 语音提示词规范
+  - Scope: 系统提示词约束、响应策略、preset 定义、验证语料基线。
+  - File: `docs/voice-prompt-spec.md`
+- 语音稳定性实施计划
+  - Scope: Omni 原生音频会话收口、扬声器断续治理、配置与文档收尾、设备验证步骤。
+  - File: `docs/plans/2026-05-05-voice-stability-plan.md`
+- 久坐监测（GC0308 + 视觉 HTTP）
+  - Scope: 抓拍周期、云端识别、可配置计时状态机、与 AirPlay / Realtime Voice 的扬声器仲裁；配置键与 TOML 映射。
+  - File: `docs/sedentary-monitor.md`

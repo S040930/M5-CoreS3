@@ -41,6 +41,23 @@ Notes:
 
 ## Runtime Verification
 
+### AirPlay Connection Chain (Must Have Logs)
+
+For "visible but no sound" regressions, treat runtime verification as a 2-stage check:
+
+1. Connection chain:
+- boot log contains AirPlay startup, mDNS success, and RTSP listen success on port 7000
+- iPhone can discover the `_raop._tcp` target
+- when selecting the target, device log must show client connection and RTSP method logs such as `ANNOUNCE`, `SETUP`, `RECORD`, or `SET_PARAMETER`
+- receiver state must advance from `discoverable` to `session_establishing` or `streaming`
+
+2. Playback chain (only after stage 1 passes):
+- playback desired/running/output-active diagnostics are printed
+- `audio_pipeline_start()` result is visible
+- if speaker is externally owned, owner tag is printed explicitly
+
+If RTSP startup fails, mDNS advertisement must be rolled back (no discoverable ghost target).
+
 ### Provisioned Device
 
 Expected behavior with valid credentials already stored in NVS:

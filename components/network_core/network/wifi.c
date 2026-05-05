@@ -15,10 +15,10 @@
 #include "esp_wifi.h"
 
 #include "sdkconfig.h"
-#include "settings.h"
 #include "wifi.h"
+#include "wifi_credentials.h"
 
-static const char *TAG = "wifi";
+static const char *TAG = "net_wifi";
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
@@ -31,6 +31,8 @@ static bool s_wifi_initialized = false;
 static bool s_sta_connected = false;
 static int s_retry_num = 0;
 static esp_timer_handle_t s_retry_timer = NULL;
+static esp_event_handler_instance_t s_wifi_evt_instance;
+static esp_event_handler_instance_t s_ip_evt_instance;
 
 static const char *wifi_disconnect_reason_to_str(uint8_t reason) {
   switch (reason) {
@@ -156,11 +158,13 @@ static esp_err_t wifi_init_base(void) {
   if (ret != ESP_OK) {
     return ret;
   }
+  s_wifi_evt_instance = instance_any_id;
   ret = esp_event_handler_instance_register(
       IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip);
   if (ret != ESP_OK) {
     return ret;
   }
+  s_ip_evt_instance = instance_got_ip;
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ret = esp_wifi_init(&cfg);
@@ -212,12 +216,12 @@ esp_err_t wifi_init_sta(void) {
     ESP_LOGI(TAG, "Using compile-time WiFi credentials for SSID: %s", ssid);
     
     // Save to NVS so they persist if compile-time override is disabled later
-    settings_set_wifi_credentials(ssid, password);
+    wifi_creds_save(ssid, password);
   }
 #else
   // Use NVS stored credentials
-  if (settings_get_wifi_ssid(ssid, sizeof(ssid)) == ESP_OK &&
-      settings_get_wifi_password(password, sizeof(password)) == ESP_OK &&
+  if (wifi_creds_get_ssid(ssid, sizeof(ssid)) == ESP_OK &&
+      wifi_creds_get_password(password, sizeof(password)) == ESP_OK &&
       strlen(ssid) > 0) {
     has_credentials = true;
   }
@@ -314,13 +318,31 @@ void wifi_stop(void) {
     return;
   }
 
-  esp_timer_stop(s_retry_timer);
+  if (s_retry_timer) {
+    esp_timer_stop(s_retry_timer);
+    esp_timer_delete(s_retry_timer);
+    s_retry_timer = NULL;
+  }
+
+  esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        s_wifi_evt_instance);
+  esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                        s_ip_evt_instance);
+
   esp_wifi_stop();
   esp_wifi_deinit();
+
+  if (s_sta_netif) {
+    esp_netif_destroy(s_sta_netif);
+    s_sta_netif = NULL;
+  }
+
+  if (s_wifi_event_group) {
+    vEventGroupDelete(s_wifi_event_group);
+    s_wifi_event_group = NULL;
+  }
+
   s_wifi_initialized = false;
   s_sta_connected = false;
   s_retry_num = 0;
-  if (s_wifi_event_group) {
-    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-  }
 }

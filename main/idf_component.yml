@@ -1,4 +1,5 @@
 dependencies:
+  espressif/esp32-camera: "^2.1.6"
   espressif/esp_audio_codec: "2.4.1"
   espressif/esp_lvgl_port: "*"
   espressif/libsodium: "1.0.20~3"

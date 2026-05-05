@@ -1,9 +1,12 @@
 #include "receiver_state.h"
 
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static receiver_state_snapshot_t s_state;
+static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static receiver_state_t choose_state(void) {
   if (s_state.faulted) {
@@ -39,12 +42,15 @@ static void refresh_state(void) {
 }
 
 void receiver_state_init(void) {
+  portENTER_CRITICAL(&s_state_lock);
   memset(&s_state, 0, sizeof(s_state));
   s_state.last_change_us = (uint64_t)esp_timer_get_time();
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_dispatch(receiver_event_t event) {
+  portENTER_CRITICAL(&s_state_lock);
   switch (event) {
   case RECEIVER_EVENT_BOOT:
     memset(&s_state, 0, sizeof(s_state));
@@ -73,9 +79,11 @@ void receiver_state_dispatch(receiver_event_t event) {
     break;
   }
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_set_config_required(bool required) {
+  portENTER_CRITICAL(&s_state_lock);
   s_state.config_required = required;
   if (required) {
     s_state.network_ready = false;
@@ -85,9 +93,11 @@ void receiver_state_set_config_required(bool required) {
     s_state.recovering = false;
   }
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_set_network_ready(bool ready) {
+  portENTER_CRITICAL(&s_state_lock);
   s_state.network_ready = ready;
   if (ready) {
     s_state.config_required = false;
@@ -98,27 +108,33 @@ void receiver_state_set_network_ready(bool ready) {
     s_state.streaming = false;
   }
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_set_discoverable(bool discoverable) {
+  portENTER_CRITICAL(&s_state_lock);
   s_state.discoverable = discoverable;
   if (!discoverable) {
     s_state.session_establishing = false;
     s_state.streaming = false;
   }
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_set_session_establishing(bool active) {
+  portENTER_CRITICAL(&s_state_lock);
   s_state.session_establishing = active;
   if (active) {
     s_state.discoverable = false;
     s_state.streaming = false;
   }
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_set_streaming(bool streaming) {
+  portENTER_CRITICAL(&s_state_lock);
   s_state.streaming = streaming;
   if (streaming) {
     s_state.discoverable = false;
@@ -126,9 +142,11 @@ void receiver_state_set_streaming(bool streaming) {
     s_state.recovering = false;
   }
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_set_recovering(bool recovering) {
+  portENTER_CRITICAL(&s_state_lock);
   s_state.recovering = recovering;
   if (recovering) {
     s_state.discoverable = false;
@@ -136,20 +154,31 @@ void receiver_state_set_recovering(bool recovering) {
     s_state.streaming = false;
   }
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 void receiver_state_set_faulted(bool faulted) {
+  portENTER_CRITICAL(&s_state_lock);
   s_state.faulted = faulted;
   refresh_state();
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
-receiver_state_t receiver_state_get(void) { return s_state.state; }
+receiver_state_t receiver_state_get(void) {
+  receiver_state_t state;
+  portENTER_CRITICAL(&s_state_lock);
+  state = s_state.state;
+  portEXIT_CRITICAL(&s_state_lock);
+  return state;
+}
 
 void receiver_state_get_snapshot(receiver_state_snapshot_t *snapshot) {
   if (!snapshot) {
     return;
   }
+  portENTER_CRITICAL(&s_state_lock);
   *snapshot = s_state;
+  portEXIT_CRITICAL(&s_state_lock);
 }
 
 const char *receiver_state_to_str(receiver_state_t state) {
@@ -172,5 +201,27 @@ const char *receiver_state_to_str(receiver_state_t state) {
     return "fault";
   default:
     return "unknown";
+  }
+}
+
+screen_ui_state_t receiver_state_map_screen_ui(receiver_state_t state) {
+  switch (state) {
+  case RECEIVER_STATE_BOOT:
+    return SCREEN_UI_STATE_BOOT;
+  case RECEIVER_STATE_CONFIG_REQUIRED:
+    return SCREEN_UI_STATE_CONFIG_REQUIRED;
+  case RECEIVER_STATE_NETWORK_READY:
+    return SCREEN_UI_STATE_NETWORK_READY;
+  case RECEIVER_STATE_DISCOVERABLE:
+    return SCREEN_UI_STATE_DISCOVERABLE;
+  case RECEIVER_STATE_SESSION_ESTABLISHING:
+    return SCREEN_UI_STATE_SESSION_ESTABLISHING;
+  case RECEIVER_STATE_STREAMING:
+    return SCREEN_UI_STATE_STREAMING;
+  case RECEIVER_STATE_RECOVERING:
+    return SCREEN_UI_STATE_RECOVERING;
+  case RECEIVER_STATE_FAULT:
+  default:
+    return SCREEN_UI_STATE_FAULT;
   }
 }

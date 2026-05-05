@@ -15,22 +15,22 @@ idf_component_register(
         "audio/audio_stream_buffered.c"
         "audio/audio_stream_realtime.c"
         "audio/audio_timing.c"
-        "resampler/resampler.c"
+        "audio/audio_volume.c"
     INCLUDE_DIRS
         "."
         "audio"
         "resampler"
     REQUIRES
         board_cores3
-        network_core
+        esp_common
+        esp_timer
+        nvs_flash
         esp_audio_codec
         esp_codec_dev
         esp_driver_i2s
-        esp_timer
         mbedtls
         libsodium
+        network_core
 )
 
-target_include_directories(${COMPONENT_LIB} PRIVATE
-    "${PROJECT_DIR}/components/airplay_core/rtsp"
-)
+# ── Removed: target_include_directories for airplay_core/rtsp (layering: Layer 2 → Layer 3 violation)

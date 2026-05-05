@@ -154,13 +154,21 @@ temp/
 # ============================================================================
 
 # Configuration files generated at build time
-# (Only commit base sdkconfig.defaults.* files)
+# The single source of truth is config/airplay.toml
+sdkconfig
 sdkconfig.*
-!sdkconfig.defaults
-!sdkconfig.defaults.*
-!sdkconfig.m5cores3
-!sdkconfig.esp32s3
-!sdkconfig.squeezeamp
+# sdkconfig.defaults is generated from config/config.toml by scripts/pio_prebuild.py
+# (may contain WiFi/API secrets); ESP-IDF reads it from the project root at configure time.
+sdkconfig.defaults
+
+# User configuration file (contains secrets)
+config/config.toml
+
+# Auto-generated config outputs (from config/config.toml)
+config/generated/
+
+# Auto-generated config audit header
+components/app_core/config_hash.h
 
 # Generated documentation
 /docs/generated/
@@ -252,3 +260,21 @@ cscope.out
 
 # Cleanup/maintenance reports
 cleanup_reports/
+
+# ============================================================================
+# IDE AI Assistant Plan Files
+# ============================================================================
+.cursor/plans/
+.codebuddy/plans/
+
+# ============================================================================
+# Documentation Binary Assets (store externally: GitHub Releases, etc.)
+# ============================================================================
+docs/archive/*.png
+docs/archive/*.stl
+
+# ============================================================================
+# Build Metadata & IDE Temporary Files
+# ============================================================================
+.pio-core/
+.vscode/

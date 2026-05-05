@@ -3,6 +3,9 @@
 #include "audio/audio_output.h"
 #include "esp_timer.h"
 #include <string.h>
+#include "esp_log.h"
+
+static const char *TAG = "audio_pipeline";
 
 static bool s_initialized = false;
 static bool s_running = false;
@@ -12,6 +15,7 @@ static uint8_t s_avg_load_pct = 0;
 static uint8_t s_peak_load_pct = 0;
 static uint32_t s_gap_concealment_blocks = 0;
 static uint32_t s_underrun_bursts = 0;
+static uint32_t s_input_frames = 0;
 
 static void refresh_load_metrics(void) {
   uint64_t now_us = (uint64_t)esp_timer_get_time();
@@ -37,6 +41,8 @@ static void refresh_load_metrics(void) {
   s_avg_load_pct = (uint8_t)((s_avg_load_pct * 3U + pct) / 4U);
   s_busy_accum_us = 0;
   s_window_start_us = now_us;
+  ESP_LOGD(TAG, "load: pct=%u avg=%u peak=%u busy_us=%llu", pct,
+           s_avg_load_pct, s_peak_load_pct, (unsigned long long)s_busy_accum_us);
 }
 
 esp_err_t audio_pipeline_init(void) {
@@ -56,6 +62,7 @@ esp_err_t audio_pipeline_init(void) {
 
   s_initialized = true;
   s_window_start_us = (uint64_t)esp_timer_get_time();
+  ESP_LOGI(TAG, "audio_pipeline initialized");
   return ESP_OK;
 }
 
@@ -71,7 +78,14 @@ esp_err_t audio_pipeline_start(const audio_pipeline_session_cfg_t *cfg) {
     audio_receiver_set_output_latency_us(cfg->target_latency_ms * 1000U);
   }
   audio_output_start();
+  if (!audio_output_is_active()) {
+    s_running = false;
+    ESP_LOGD(TAG, "audio_pipeline start deferred (output owned externally)");
+    return ESP_ERR_INVALID_STATE;
+  }
   s_running = true;
+  ESP_LOGI(TAG, "audio_pipeline started (target_latency_ms=%u)",
+           cfg ? cfg->target_latency_ms : 0);
   return ESP_OK;
 }
 
@@ -84,6 +98,18 @@ void audio_pipeline_stop(void) {
   audio_receiver_stop();
   audio_receiver_flush();
   s_running = false;
+  ESP_LOGI(TAG, "audio_pipeline stopped");
+}
+
+void audio_pipeline_note_input_frames(uint32_t frames) {
+  if (frames == 0) {
+    return;
+  }
+  s_input_frames += frames;
+}
+
+uint32_t audio_pipeline_get_input_frames(void) {
+  return s_input_frames;
 }
 
 void audio_pipeline_flush(void) {

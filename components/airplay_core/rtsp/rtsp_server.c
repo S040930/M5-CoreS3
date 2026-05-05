@@ -24,6 +24,8 @@
 
 static const char *TAG = "rtsp_server";
 
+static char s_device_name[65] = {0};
+
 #define RTSP_PORT           7000
 #define RTSP_BUFFER_INITIAL 4096
 #define RTSP_BUFFER_LARGE   ((size_t)256 * 1024)
@@ -35,14 +37,15 @@ static const char *TAG = "rtsp_server";
 static int server_socket = -1;
 static TaskHandle_t server_task_handle = NULL;
 static bool server_running = false;
+static volatile int s_start_errno = 0;
 
 // Static task memory for client tasks (one per slot)
 static StaticTask_t s_client_tcb[2];
-static StackType_t s_client_stack[2][CLIENT_STACK_SIZE / sizeof(StackType_t)];
+static StackType_t *s_client_stack[2] = {NULL, NULL};
 
 // Static task memory for server task
 static StaticTask_t s_server_tcb;
-static StackType_t s_server_stack[SERVER_STACK_SIZE / sizeof(StackType_t)];
+static StackType_t *s_server_stack = NULL;
 
 // Client slot for tracking connections
 typedef struct {
@@ -162,10 +165,10 @@ static void client_task(void *pvParameters) {
     ESP_LOGE(TAG, "Failed to create connection state");
     close(slot->socket);
     slot->socket = -1;
-    slot->task = NULL;
     vTaskDelete(NULL);
     return;
   }
+  strncpy(conn->device_name, s_device_name, sizeof(conn->device_name) - 1);
   slot->conn = conn;
 
   // Get client IP address for timing requests
@@ -316,6 +319,8 @@ static void server_task(void *pvParameters) {
   server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (server_socket < 0) {
     ESP_LOGE(TAG, "Failed to create socket: %d", errno);
+    s_start_errno = errno;
+    server_task_handle = NULL;
     vTaskDelete(NULL);
     return;
   }
@@ -331,21 +336,26 @@ static void server_task(void *pvParameters) {
   if (bind(server_socket, (struct sockaddr *)&server_addr,
            sizeof(server_addr)) < 0) {
     ESP_LOGE(TAG, "Failed to bind: %d", errno);
+    s_start_errno = errno;
     close(server_socket);
     server_socket = -1;
+    server_task_handle = NULL;
     vTaskDelete(NULL);
     return;
   }
 
   if (listen(server_socket, 5) < 0) {
     ESP_LOGE(TAG, "Failed to listen: %d", errno);
+    s_start_errno = errno;
     close(server_socket);
     server_socket = -1;
+    server_task_handle = NULL;
     vTaskDelete(NULL);
     return;
   }
 
   ESP_LOGI(TAG, "RTSP server listening on port %d", RTSP_PORT);
+  s_start_errno = 0;
   server_running = true;
 
   while (server_running) {
@@ -353,7 +363,7 @@ static void server_task(void *pvParameters) {
                             &client_addr_len);
     if (new_socket < 0) {
       if (server_running) {
-        ESP_LOGE(TAG, "Failed to accept: %d", errno);
+        ESP_LOGE(TAG, "Failed to accept: errno=%d", errno);
       }
       continue;
     }
@@ -390,7 +400,20 @@ static void server_task(void *pvParameters) {
     clients[new_slot].should_stop = false;
     clients[new_slot].is_old = false;
 
-    // Start new client task immediately (static allocation)
+    if (!s_client_stack[new_slot]) {
+      s_client_stack[new_slot] = heap_caps_malloc(CLIENT_STACK_SIZE,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (!s_client_stack[new_slot]) {
+        s_client_stack[new_slot] = malloc(CLIENT_STACK_SIZE);
+      }
+    }
+    if (!s_client_stack[new_slot]) {
+      ESP_LOGE(TAG, "Failed to allocate client stack");
+      close(new_socket);
+      clients[new_slot].socket = -1;
+      continue;
+    }
+
     clients[new_slot].task = xTaskCreateStatic(
         client_task, "rtsp_client", CLIENT_STACK_SIZE / sizeof(StackType_t),
         (void *)(intptr_t)new_slot, 5, s_client_stack[new_slot],
@@ -428,25 +451,70 @@ static void server_task(void *pvParameters) {
   }
 
   log_stack_watermark("rtsp_server_exit", uxTaskGetStackHighWaterMark(NULL));
+  server_task_handle = NULL;
   vTaskDelete(NULL);
 }
 
-esp_err_t rtsp_server_start(void) {
+esp_err_t rtsp_server_start(const char *device_name) {
   if (server_task_handle != NULL) {
+    ESP_LOGW(TAG, "rtsp_server_start ignored: task already exists");
     return ESP_ERR_INVALID_STATE;
   }
 
+  ESP_LOGI(TAG, "rtsp_server_start requested");
+
+  if (device_name) {
+    strncpy(s_device_name, device_name, sizeof(s_device_name) - 1);
+    s_device_name[sizeof(s_device_name) - 1] = '\0';
+  }
+
+  if (!s_server_stack) {
+    s_server_stack = heap_caps_malloc(SERVER_STACK_SIZE,
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_server_stack) {
+      s_server_stack = malloc(SERVER_STACK_SIZE);
+    }
+  }
+  if (!s_server_stack) {
+    ESP_LOGE(TAG, "Failed to allocate server stack");
+    return ESP_ERR_NO_MEM;
+  }
+
+  s_start_errno = 0;
+  server_running = false;
   server_task_handle = xTaskCreateStatic(
       server_task, "rtsp_server", SERVER_STACK_SIZE / sizeof(StackType_t), NULL,
       5, s_server_stack, &s_server_tcb);
   if (server_task_handle == NULL) {
+    ESP_LOGE(TAG, "Failed to create RTSP server task");
     return ESP_FAIL;
   }
 
-  return ESP_OK;
+  for (int i = 0; i < 80; i++) {
+    if (server_running) {
+      ESP_LOGI(TAG, "RTSP server start confirmed (port=%d)", RTSP_PORT);
+      return ESP_OK;
+    }
+    if (server_task_handle == NULL) {
+      ESP_LOGE(TAG, "RTSP server task exited during startup (errno=%d)",
+               s_start_errno);
+      return ESP_FAIL;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  ESP_LOGE(TAG, "RTSP server startup timed out (errno=%d)", s_start_errno);
+  rtsp_server_stop();
+  return ESP_ERR_TIMEOUT;
+
+}
+
+bool rtsp_server_is_running(void) {
+  return server_running && server_task_handle != NULL;
 }
 
 void rtsp_server_stop(void) {
+  ESP_LOGI(TAG, "rtsp_server_stop requested");
   server_running = false;
 
   if (server_socket >= 0) {
@@ -459,4 +527,6 @@ void rtsp_server_stop(void) {
     vTaskDelay(pdMS_TO_TICKS(100));
     server_task_handle = NULL;
   }
+
+  ESP_LOGI(TAG, "RTSP server stopped");
 }

@@ -44,7 +44,7 @@ typedef struct __attribute__((packed)) {
 #define STACK_LOG_INTERVAL_US 15000000LL
 
 static StaticTask_t s_ntp_tcb;
-static StackType_t s_ntp_stack[NTP_STACK_SIZE / sizeof(StackType_t)];
+static StackType_t *s_ntp_stack = NULL;
 
 // Timing state
 static struct {
@@ -359,6 +359,21 @@ esp_err_t ntp_clock_start_client(uint32_t remote_ip, uint16_t remote_port) {
   memset(ntp.measurements, 0, sizeof(ntp.measurements));
   memset(ntp.dispersions, 0, sizeof(ntp.dispersions));
   ntp.running = true;
+
+  if (!s_ntp_stack) {
+    s_ntp_stack = heap_caps_malloc(NTP_STACK_SIZE,
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_ntp_stack) {
+      s_ntp_stack = malloc(NTP_STACK_SIZE);
+    }
+  }
+  if (!s_ntp_stack) {
+    ESP_LOGE(TAG, "Failed to allocate NTP stack");
+    close(ntp.socket);
+    ntp.socket = -1;
+    ntp.running = false;
+    return ESP_ERR_NO_MEM;
+  }
 
   ntp.task_handle = xTaskCreateStatic(ntp_task, "ntp_clock",
                                       NTP_STACK_SIZE / sizeof(StackType_t),

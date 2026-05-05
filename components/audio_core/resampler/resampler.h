@@ -8,6 +8,9 @@
 
 // resampler.h
 
+#ifndef AIRPLAY_AUDIO_RESAMPLER_H_
+#define AIRPLAY_AUDIO_RESAMPLER_H_
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -98,3 +101,5 @@ void resampleFree(Resample *cxt);
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* AIRPLAY_AUDIO_RESAMPLER_H_ */

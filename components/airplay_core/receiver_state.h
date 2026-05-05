@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "screen_ui.h"
 
 typedef enum {
   RECEIVER_STATE_BOOT = 0,
@@ -47,5 +48,6 @@ void receiver_state_set_streaming(bool streaming);
 void receiver_state_set_recovering(bool recovering);
 void receiver_state_set_faulted(bool faulted);
 receiver_state_t receiver_state_get(void);
+screen_ui_state_t receiver_state_map_screen_ui(receiver_state_t state);
 void receiver_state_get_snapshot(receiver_state_snapshot_t *snapshot);
 const char *receiver_state_to_str(receiver_state_t state);

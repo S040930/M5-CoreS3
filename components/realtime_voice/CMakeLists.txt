@@ -1,0 +1,28 @@
+idf_component_register(
+    SRCS
+        "realtime_voice.c"
+        "voice_dsp.c"
+        "voice_reference.c"
+        "afe_bridge.c"
+        "resampler_bridge.c"
+        "voice_playout.c"
+        "voice_request.c"
+        "voice_tools.c"
+        "voice_timers.c"
+        "voice_frontend.c"
+    INCLUDE_DIRS
+        "."
+        "../audio_core/resampler"
+    REQUIRES
+        airplay_core
+        audio_core
+        m5stack_core_s3
+        network_core
+        screen_ui
+        esp_http_client
+        esp_websocket_client
+        esp-sr
+        json
+        mbedtls
+        esp_timer
+)

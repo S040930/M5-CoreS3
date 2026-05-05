@@ -14,6 +14,7 @@
 #include "audio_receiver_internal.h"
 #include "audio_stream.h"
 #include "audio_timing.h"
+#include "audio_pipeline.h"
 
 #define DEFAULT_SAMPLE_RATE     44100
 #define DEFAULT_CHANNELS        2
@@ -468,8 +469,14 @@ size_t audio_receiver_read(int16_t *buffer, size_t samples) {
     return 0;
   }
 
-  return audio_timing_read(&receiver.timing, &receiver.buffer, receiver.stream,
-                           &receiver.stats, buffer, samples);
+  size_t ret = audio_timing_read(&receiver.timing, &receiver.buffer,
+                                receiver.stream, &receiver.stats, buffer,
+                                samples);
+  if (ret > 0 && receiver.stream && receiver.stream->format.channels > 0) {
+    uint32_t frames = (uint32_t)(ret / receiver.stream->format.channels);
+    audio_pipeline_note_input_frames(frames);
+  }
+  return ret;
 }
 
 bool audio_receiver_has_data(void) {

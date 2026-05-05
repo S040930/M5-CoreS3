@@ -1,0 +1,198 @@
+# AirPlay 项目配置模板
+# 复制此文件为 config/config.toml 并填入真实的配置
+#
+# 编辑 config/config.toml 后直接运行 `pio run`
+# 脚本会自动生成 config/generated/sdkconfig.defaults
+
+[meta]
+name = "cores3-airplay-core"
+version = "1.0.0"
+board = "m5stack-cores3"
+mcu = "esp32s3"
+
+# =========================================================================
+# WiFi 网络配置
+# =========================================================================
+[wifi]
+ssid = "YOUR_WIFI_SSID"
+password = "YOUR_WIFI_PASSWORD"
+enable_wpa3_sae = true
+enable_compile_time_creds = false
+
+[wifi.buffers]
+static_rx_num = 10
+dynamic_rx_num = 16
+dynamic_tx_num = 16
+
+[wifi.event_task]
+stack_size = 4096
+
+# =========================================================================
+# AirPlay 核心
+# =========================================================================
+[airplay]
+force_v1 = true
+
+# =========================================================================
+# 音频输出
+# =========================================================================
+[audio.output]
+target_latency_ms = 150
+max_buffer_ms = 300
+sample_rate_hz = 44100
+mono_downmix = true
+fidelity_mode = "pure"
+
+[audio.resampler]
+taps = 28
+
+[audio.prealloc]
+realtime_buffer_count = 2
+
+# =========================================================================
+# 实时语音 (Qwen Omni / DashScope)
+# =========================================================================
+[voice]
+enabled_at_boot = true
+url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+api_key = "YOUR_DASHSCOPE_API_KEY"
+model = "qwen3.5-omni-flash-realtime"
+tts_voice = "Ethan"
+input_sample_rate = 16000
+output_sample_rate = 24000
+uplink_frame_ms = 40
+
+[voice.transcription]
+enabled = true
+model = "gummy-realtime-v1"
+
+# Local function calling (timers, device status, and speaker volume).
+[voice.tools]
+enabled = true
+
+# 默认连续监听：本地 WakeNet 识别 Hi ESP 后进入会话。
+[voice.activation]
+enabled = true
+phrase = "Hi ESP"
+# AFE (Audio Front-End): always-on pipeline that bundles AEC + nsnet1 + AGC +
+# VADNet + WakeNet. The legacy "afe_enabled" toggle and "rms_threshold" knob
+# have been removed; VADNet on the AEC-cleaned signal is the only client VAD.
+
+[voice.vad]
+silence_timeout_ms = 700
+min_speech_ms = 350
+consecutive_frames = 2
+
+[voice.session]
+idle_timeout_ms = 15000
+context_max_chars = 256
+prompt_preset = "balanced"
+
+[voice.health]
+append_timeout_ms = 8000
+debug_event_log = true
+
+[voice.debug]
+tls_heap_log = false
+
+[voice.capture]
+# Codec input gain (dB); raises RMS for client VAD if threshold is already low.
+mic_in_gain_db = 33
+stall_timeout_ms = 2000
+recovery_retry_max = 3
+stall_cycle_max = 6
+recovery_cooldown_ms = 3000
+
+[voice.websocket]
+connect_timeout_ms = 25000
+retry_base_ms = 1500
+retry_max_ms = 20000
+retry_jitter_ms = 300
+ping_interval_sec = 30
+send_timeout_ms = 5000
+
+# =========================================================================
+# 久坐监测（GC0308 本地粗检测 + 本地提醒，与 Realtime Voice 分离；不依赖网络）
+# =========================================================================
+[sedentary]
+enabled = false
+capture_interval_sec = 30
+remind_after_sec = 3600
+absence_reset_sec = 600
+repeat_interval_sec = 900
+detect_fail_suspend_count = 5
+suspend_cooldown_sec = 300
+camera.xclk_gpio = 15
+voice_prompt = "stand up"
+
+[sedentary.local]
+present_threshold = 12
+absent_threshold = 5
+present_confirm_count = 3
+absent_confirm_count = 3
+roi_margin_px = 8
+enable_calibration = true
+recalibrate_on_boot = false
+
+# =========================================================================
+# 系统级
+# =========================================================================
+[system]
+cpu_freq_mhz = 240
+flash_size_mb = 16
+flash_mode = "qio"
+spiram_mode = "quad"
+monitor_baud = 115200
+console = "usb_serial_jtag"
+
+[system.log]
+default_level = "debug"
+maximum_level = "debug"
+enable_colors = true
+suppress_spi_master_logs = true
+
+[system.lwip]
+max_sockets = 8
+
+[system.freertos]
+allow_ext_mem_task_create = true
+
+[system.spiram]
+spiram_malloc_always_internal = 4096
+
+# =========================================================================
+# mbedTLS 加密
+# =========================================================================
+[tls]
+default_mem_alloc = true
+certificate_bundle = true
+certificate_bundle_default_cmn = true
+
+# =========================================================================
+# mDNS 服务发现
+# =========================================================================
+[mdns]
+max_services = 10
+task_from_spiram = true
+memory_alloc_spiram = true
+
+# =========================================================================
+# 屏幕 UI（LVGL 动画周期与语音 TLS 错峰）
+# =========================================================================
+[ui]
+anim_interval_ms = 33
+anim_stress_interval_ms = 200
+
+# =========================================================================
+# LVGL 图形
+# =========================================================================
+[lvgl]
+build_examples = false
+build_demos = false
+cjk_font_enabled = true
+
+# =========================================================================
+# NVS 运行时默认值
+# =========================================================================
+[nvs.defaults]
+device_name = "ESP32 AirPlay"

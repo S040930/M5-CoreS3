@@ -24,42 +24,27 @@ Removed runtime responsibilities:
 - external DAC families
 - local button, LED, and playback-control paths
 
-## Component Map
+## 组件图（目标五层架构）
+```
+Layer 5: App Entry      → main/main.c
+Layer 4: Application    → app_core/           (app_core, settings)
+Layer 3: Service        → airplay_core/       (airplay_service, rtsp, plist)
+                        → realtime_voice/     (realtime_voice)
+Layer 2: Domain         → audio_core/         (pipeline, decoder, dsp, output, timing...)
+                        → screen_ui/          (screen_ui, ui_spectrum, ui_lyric...)
+                        → network_core/       (wifi, mdns, ntp, socket_utils)
+Layer 1: HAL/BSP        → board_cores3/       (board, partitions)
+```
 
-### `components/app_core`
+### 强制依赖规则
+| 规则 | 说明 |
+|------|------|
+| 禁止向上依赖 | Layer N 不得 #include Layer N+1 或更高的头文件 |
+| 禁止跨层跳级 | Layer 3 只能通过 Layer 2 接口访问底层 |
+| 同层隔离 | 同层级组件间不得相互依赖 |
+| ESP-IDF 无限制 | 所有层均可依赖 esp_*、lvgl、cJSON 等 |
 
-- Owns startup sequencing.
-- Initializes NVS and retained settings.
-- Decides whether the device should enter idle `CONFIG_REQUIRED` or start networking.
-- Runs the small network monitor task that starts and stops AirPlay with connectivity.
-
-### `components/airplay_core`
-
-- Owns AirPlay service bootstrap.
-- Hosts RTSP request handling and plist helpers.
-- Publishes session state transitions into the retained receiver-state model.
-
-### `components/audio_core`
-
-- Owns the playable audio path only.
-- Contains decode, timing, buffering, DSP/EQ defaults, resampling, and CoreS3 speaker output.
-- Talks to the board layer for the single retained speaker handle.
-
-### `components/network_core`
-
-- Owns STA Wi-Fi, mDNS registration, NTP clock, and socket helpers.
-- No SoftAP, no provisioning UI helpers, no HTTP management surface.
-
-### `components/board_cores3`
-
-- Owns the single supported board.
-- Initializes the CoreS3 BSP audio path and speaker codec handle.
-- Carries the single-app partition table used by the default build.
-
-### `main/main.c`
-
-- Thin entrypoint only.
-- Calls `app_core_run()` and contains no product logic.
+详见: `docs/adr/adr-001-layered-architecture.md`
 
 ## Startup Flow
 

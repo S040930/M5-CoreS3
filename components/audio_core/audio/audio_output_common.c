@@ -5,9 +5,10 @@
 #include "audio_eq.h"
 #include "audio_receiver.h"
 #include "audio_resample.h"
+#include "audio_volume.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
-#include "rtsp_server.h"
 #include <stdlib.h>
 
 #define TAG "audio_output"
@@ -58,7 +59,9 @@ static int16_t peak_abs_sample(const int16_t *buf, size_t n) {
 static void apply_volume(int16_t *buf, size_t n) {
   int32_t gain_q15 = OUTPUT_HEADROOM_Q15;
   if (s_ops && s_ops->software_volume) {
-    int32_t vol_q15 = airplay_get_volume_q15();
+    float vol_db = 0.0f;
+    audio_volume_load(&vol_db);
+    int32_t vol_q15 = audio_volume_db_to_q15(vol_db);
     gain_q15 = (int32_t)(((int64_t)gain_q15 * vol_q15) >> 15);
   }
   for (size_t i = 0; i < n; i++) {
@@ -75,7 +78,9 @@ static void maybe_log_gain_path(void) {
   int32_t vol_q15 = 32768;
   int32_t effective_q15 = OUTPUT_HEADROOM_Q15;
   if (s_ops && s_ops->software_volume) {
-    vol_q15 = airplay_get_volume_q15();
+    float vol_db = 0.0f;
+    audio_volume_load(&vol_db);
+    vol_q15 = audio_volume_db_to_q15(vol_db);
     effective_q15 = (int32_t)(((int64_t)OUTPUT_HEADROOM_Q15 * vol_q15) >> 15);
   }
 
@@ -105,19 +110,46 @@ static void apply_concealment_fade(int16_t *buf, size_t sample_count,
 #define PLAYBACK_RESAMPLE_BUF_FRAMES 400
 
 static void playback_task(void *arg) {
-  /* Static buffers eliminate heap fragmentation and save ~8KB DRAM */
-  static int16_t s_pcm_buf[(AO_FRAME_SAMPLES + 1) * 2];
-  static int16_t s_silence_buf[AO_FRAME_SAMPLES * 2];
-  static int16_t s_resample_buf[PLAYBACK_RESAMPLE_BUF_FRAMES * 2];
-  static int16_t s_last_good_buf[PLAYBACK_RESAMPLE_BUF_FRAMES * 2];
+  static int16_t *s_pcm_buf = NULL;
+  static int16_t *s_silence_buf = NULL;
+  static int16_t *s_resample_buf = NULL;
+  static int16_t *s_last_good_buf = NULL;
+
+  if (!s_pcm_buf) {
+    s_pcm_buf = heap_caps_malloc((AO_FRAME_SAMPLES + 1) * 2 * sizeof(int16_t),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_pcm_buf) s_pcm_buf = malloc((AO_FRAME_SAMPLES + 1) * 2 * sizeof(int16_t));
+  }
+  if (!s_silence_buf) {
+    s_silence_buf = heap_caps_malloc(AO_FRAME_SAMPLES * 2 * sizeof(int16_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_silence_buf) s_silence_buf = malloc(AO_FRAME_SAMPLES * 2 * sizeof(int16_t));
+  }
+  if (!s_resample_buf) {
+    s_resample_buf = heap_caps_malloc(PLAYBACK_RESAMPLE_BUF_FRAMES * 2 * sizeof(int16_t),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_resample_buf) s_resample_buf = malloc(PLAYBACK_RESAMPLE_BUF_FRAMES * 2 * sizeof(int16_t));
+  }
+  if (!s_last_good_buf) {
+    s_last_good_buf = heap_caps_malloc(PLAYBACK_RESAMPLE_BUF_FRAMES * 2 * sizeof(int16_t),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_last_good_buf) s_last_good_buf = malloc(PLAYBACK_RESAMPLE_BUF_FRAMES * 2 * sizeof(int16_t));
+  }
+  if (!s_pcm_buf || !s_silence_buf || !s_resample_buf || !s_last_good_buf) {
+    ESP_LOGE(TAG, "Failed to allocate playback buffers");
+    playback_running = false;
+    playback_task_handle = NULL;
+    vTaskDelete(NULL);
+    return;
+  }
 
   int16_t *pcm = s_pcm_buf;
   int16_t *silence = s_silence_buf;
   int16_t *resample_buf = s_resample_buf;
   int16_t *last_good_buf = s_last_good_buf;
 
-  memset(silence, 0, sizeof(s_silence_buf));
-  memset(last_good_buf, 0, sizeof(s_last_good_buf));
+  memset(silence, 0, AO_FRAME_SAMPLES * 2 * sizeof(int16_t));
+  memset(last_good_buf, 0, PLAYBACK_RESAMPLE_BUF_FRAMES * 2 * sizeof(int16_t));
 
   audio_eq_init((uint32_t)AO_OUTPUT_RATE);
   audio_dsp_init((uint32_t)AO_OUTPUT_RATE);
@@ -159,10 +191,24 @@ static void playback_task(void *arg) {
       audio_eq_process(play_buf, play_samples * 2);
       audio_dsp_process(play_buf, play_samples * 2);
       int16_t output_peak = peak_abs_sample(play_buf, play_samples * 2);
+#if AO_OUTPUT_CHANNELS == 1
+      for (size_t i = 0; i < play_samples; i++) {
+        int32_t l = (int32_t)play_buf[i * 2];
+        int32_t r = (int32_t)play_buf[i * 2 + 1];
+        int16_t mono = (int16_t)((l + r) / 2);
+        play_buf[i * 2] = mono;
+        play_buf[i * 2 + 1] = mono;
+      }
       if (last_good_buf && play_samples > 0) {
         memcpy(last_good_buf, play_buf, play_samples * 2 * sizeof(int16_t));
         last_good_samples = play_samples * 2;
       }
+#else
+      if (last_good_buf && play_samples > 0) {
+        memcpy(last_good_buf, play_buf, play_samples * 2 * sizeof(int16_t));
+        last_good_samples = play_samples * 2;
+      }
+#endif
       concealment_repeats = 0;
       maybe_log_gain_path();
 
@@ -204,7 +250,7 @@ static void playback_task(void *arg) {
         audio_dsp_get_stats(&cur_dsp);
         ESP_LOGI(TAG,
                  "[fidelity] mode=%s in_peak=%d out_peak=%d limiter+%lu late+%lu "
-                 "drop+%lu underrun+%lu buffered=%u",
+                 "drop+%lu underrun+%lu buffered=%u source=real",
                  s_fidelity_mode == AUDIO_FIDELITY_MODE_ENHANCED ? "enhanced"
                                                                   : "pure",
                  input_peak, output_peak,
@@ -219,7 +265,7 @@ static void playback_task(void *arg) {
         prev_dsp = cur_dsp;
       }
       if (s_ops && s_ops->write_pcm) {
-        s_ops->write_pcm(s_ops->ctx, play_buf, play_samples * 4,
+        s_ops->write_pcm(s_ops->ctx, play_buf, play_samples * 2 * sizeof(int16_t),
                          portMAX_DELAY);
       }
       audio_pipeline_note_playback_busy(
@@ -253,14 +299,24 @@ static void playback_task(void *arg) {
             concealment_repeats < GAP_CONCEAL_REPEAT_MAX) {
           apply_concealment_fade(last_good_buf, last_good_samples,
                                  concealment_repeats);
+          int16_t concealment_peak = peak_abs_sample(last_good_buf, last_good_samples);
+          if (concealment_repeats == 0) {
+            ESP_LOGW(TAG, "[playback] gap_concealment start: repeat=%u peak=%d", 
+                     concealment_repeats, concealment_peak);
+          }
           s_ops->write_pcm(s_ops->ctx, last_good_buf,
                            last_good_samples * sizeof(int16_t),
                            pdMS_TO_TICKS(10));
           audio_pipeline_note_gap_concealment(concealment_repeats == 0);
           concealment_repeats++;
         } else {
+          if (concealment_repeats == 0) {
+            ESP_LOGW(TAG, "[playback] silence fill: no last_good_buf, buffer=%u, anchor=%d",
+                     audio_receiver_get_buffered_frames(),
+                     audio_receiver_anchor_valid() ? 1 : 0);
+          }
           s_ops->write_pcm(s_ops->ctx, silence,
-                           (size_t)AO_FRAME_SAMPLES * 4, pdMS_TO_TICKS(10));
+                           (size_t)AO_FRAME_SAMPLES * 2 * sizeof(int16_t), pdMS_TO_TICKS(10));
         }
       }
       audio_pipeline_note_playback_busy(

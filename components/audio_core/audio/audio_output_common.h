@@ -11,6 +11,12 @@
 #define AO_FRAME_SAMPLES 352
 #define AO_OUTPUT_RATE   CONFIG_OUTPUT_SAMPLE_RATE_HZ
 
+#if defined(CONFIG_OUTPUT_MONO)
+#define AO_OUTPUT_CHANNELS 1
+#else
+#define AO_OUTPUT_CHANNELS 2
+#endif
+
 #define AO_MAX_RESAMPLE_FRAMES \
   ((size_t)((AO_FRAME_SAMPLES + 2) * ((double)AO_OUTPUT_RATE / 44100) + 16))
 

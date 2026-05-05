@@ -2,113 +2,85 @@
 
 #include "bsp/m5stack_core_s3.h"
 #include "esp_log.h"
-#include <stdio.h>
-#include <string.h>
+#include "sdkconfig.h"
+#include "lvgl.h"
+#include "screen_ui_theme.h"
 
 static const char *TAG = "screen_ui";
 
-static bool s_initialized = false;
-static bool s_streaming = false;
-static bool s_wifi_connected = false;
-static bool s_airplay_ready = false;
-static uint32_t s_phase = 0;
-static screen_ui_state_t s_state = SCREEN_UI_STATE_BOOT;
-static screen_ui_metadata_t s_metadata = {0};
+typedef struct {
+  lv_obj_t *screen;
+  lv_obj_t *airplay_label;
+  lv_obj_t *omni_label;
+  lv_timer_t *anim_timer;
+  bool initialized;
+  bool streaming;
+  bool playing;
+  screen_ui_state_t state;
+  screen_ui_voice_state_t voice_state;
+  void (*voice_ptt_callback)(void);
+} screen_ui_ctx_t;
 
-static lv_obj_t *s_screen = NULL;
-static lv_obj_t *s_left_bar = NULL;
-static lv_obj_t *s_right_bar = NULL;
-static lv_obj_t *s_lyric_label = NULL;
-static lv_timer_t *s_anim_timer = NULL;
+static screen_ui_ctx_t s_ui = {0};
 
-static lv_obj_t *screen_active(void) {
-#if LVGL_VERSION_MAJOR >= 9
-  return lv_screen_active();
-#else
-  return lv_scr_act();
+static void screen_ui_update_labels(void);
+static void screen_tap_event_cb(lv_event_t *event);
+
+#ifndef CONFIG_SCREEN_UI_ANIM_INTERVAL_MS
+#define CONFIG_SCREEN_UI_ANIM_INTERVAL_MS 100
 #endif
-}
-
-static void delete_obj(lv_obj_t **obj) {
-  if (obj == NULL || *obj == NULL) {
-    return;
-  }
-#if LVGL_VERSION_MAJOR >= 9
-  lv_obj_delete(*obj);
-#else
-  lv_obj_del(*obj);
-#endif
-  *obj = NULL;
-}
-
-// Ultra-minimalist mode: no status text helpers needed
-
-// No longer using status labels in ultra-minimalist mode
 
 static void anim_timer_cb(lv_timer_t *timer) {
   (void)timer;
-  if (!s_initialized || s_left_bar == NULL || s_right_bar == NULL) {
+  if (!s_ui.initialized) return;
+  screen_ui_update_labels();
+}
+
+static void screen_ui_update_labels(void) {
+  if (!s_ui.initialized) return;
+
+  bool show_omni = (s_ui.voice_state != SCREEN_UI_VOICE_OFF);
+  bool show_airplay = !show_omni &&
+      (s_ui.state == SCREEN_UI_STATE_STREAMING ||
+       s_ui.state == SCREEN_UI_STATE_DISCOVERABLE ||
+       s_ui.state == SCREEN_UI_STATE_SESSION_ESTABLISHING);
+
+  if (show_airplay) {
+    lv_obj_remove_flag(s_ui.airplay_label, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(s_ui.airplay_label, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (show_omni) {
+    lv_obj_remove_flag(s_ui.omni_label, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(s_ui.omni_label, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+static void screen_tap_event_cb(lv_event_t *event) {
+  (void)event;
+  if (!s_ui.initialized || s_ui.voice_state == SCREEN_UI_VOICE_OFF) {
     return;
   }
-
-  s_phase = (s_phase + 3U) % 80U;
-  uint32_t tri = s_phase <= 40U ? s_phase : (80U - s_phase);
-  int base_h = s_streaming ? 26 : 8;
-  int delta_l = s_streaming ? (int)(tri / 2U) : 0;
-  int delta_r = s_streaming ? (int)((40U - tri) / 2U) : 0;
-  int left_h = base_h + delta_l;
-  int right_h = base_h + delta_r;
-
-  lv_obj_set_size(s_left_bar, 20, left_h);
-  lv_obj_set_size(s_right_bar, 20, right_h);
-  lv_obj_align(s_left_bar, LV_ALIGN_LEFT_MID, 16, 0);
-  lv_obj_align(s_right_bar, LV_ALIGN_RIGHT_MID, -16, 0);
-
-  // Cyberpunk cycling color logic (Blue -> Purple -> Pink)
-  static uint16_t color_hue = 190;
-  static int8_t hue_step = 1;
-  color_hue += hue_step;
-  if (color_hue >= 320) hue_step = -1;
-  if (color_hue <= 190) hue_step = 1;
-
-  lv_color_t bar_color = lv_color_hsv_to_rgb(color_hue, 90, 100);
-  lv_obj_set_style_bg_color(s_left_bar, bar_color, 0);
-  lv_obj_set_style_bg_color(s_right_bar, bar_color, 0);
-
-  // Dynamic glow effect using opa instead of green channel tweaking
-  uint8_t opa = (uint8_t)(160U + tri * 2U);
-  lv_obj_set_style_bg_opa(s_left_bar, opa, 0);
-  lv_obj_set_style_bg_opa(s_right_bar, opa, 0);
-
-  // Real-time track info display in center (matching 'lyric' style)
-  if (s_lyric_label != NULL) {
-    if (s_streaming) {
-      const char *track_text = (s_metadata.title[0] != '\0') ? s_metadata.title : "STREAMING";
-      lv_label_set_text(s_lyric_label, track_text);
-      // Breathing effect
-      uint8_t opa = (uint8_t)(180U + tri * 1.5f);
-      lv_obj_set_style_text_opa(s_lyric_label, opa, 0);
-    } else {
-      lv_label_set_text(s_lyric_label, "READY");
-      lv_obj_set_style_text_opa(s_lyric_label, 128, 0);
-    }
+  if (s_ui.voice_state == SCREEN_UI_VOICE_STANDBY) {
+    return;
+  }
+  if (s_ui.voice_ptt_callback != NULL) {
+    s_ui.voice_ptt_callback();
   }
 }
 
 esp_err_t screen_ui_init(void) {
-  if (s_initialized) {
-    return ESP_OK;
-  }
+  if (s_ui.initialized) return ESP_OK;
 
   bsp_display_cfg_t cfg = {
       .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
-      .buffer_size = BSP_LCD_H_RES * 30,
-      .double_buffer = false,
-      .flags =
-          {
-              .buff_dma = false,
-              .buff_spiram = true,
-          },
+      .buffer_size = BSP_LCD_H_RES * 20,
+      .double_buffer = true,
+      .flags = {
+          .buff_dma = false,
+          .buff_spiram = true,
+      },
   };
   cfg.lvgl_port_cfg.task_affinity = 1;
 
@@ -117,7 +89,6 @@ esp_err_t screen_ui_init(void) {
     ESP_LOGE(TAG, "display start failed");
     return ESP_FAIL;
   }
-  (void)disp;
 
   esp_err_t err = bsp_display_backlight_on();
   if (err != ESP_OK) {
@@ -128,93 +99,121 @@ esp_err_t screen_ui_init(void) {
     return ESP_FAIL;
   }
 
-  s_screen = screen_active();
-  lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x000000), 0);
-  lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
+  s_ui.screen = lv_screen_active();
+  lv_obj_set_style_bg_color(s_ui.screen, screen_ui_theme_bg_color(), 0);
+  lv_obj_set_style_bg_opa(s_ui.screen, LV_OPA_COVER, 0);
+  lv_obj_add_flag(s_ui.screen, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(s_ui.screen, screen_tap_event_cb, LV_EVENT_CLICKED, NULL);
 
-  // Lyric Label (Centered on screen like simulator)
-  s_lyric_label = lv_label_create(s_screen);
-  lv_obj_set_width(s_lyric_label, 260); // Wide area for lyrics
-  lv_obj_set_style_text_color(s_lyric_label, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(s_lyric_label, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_align(s_lyric_label, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_long_mode(s_lyric_label, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(s_lyric_label, "READY");
-  lv_obj_align(s_lyric_label, LV_ALIGN_CENTER, 0, 0);
+  static lv_style_t airplay_style;
+  lv_style_init(&airplay_style);
+  lv_style_set_text_color(&airplay_style, lv_color_hex(0xE8F4FD));
+  lv_style_set_text_font(&airplay_style, &lv_font_montserrat_14);
+  lv_style_set_text_align(&airplay_style, LV_TEXT_ALIGN_CENTER);
+  lv_style_set_bg_opa(&airplay_style, LV_OPA_TRANSP);
 
-  s_left_bar = lv_obj_create(s_screen);
-  lv_obj_remove_style_all(s_left_bar);
-  lv_obj_set_style_radius(s_left_bar, 6, 0);
-  lv_obj_set_style_bg_opa(s_left_bar, LV_OPA_COVER, 0);
-  lv_obj_set_size(s_left_bar, 20, 8);
-  lv_obj_align(s_left_bar, LV_ALIGN_LEFT_MID, 16, 0);
+  s_ui.airplay_label = lv_label_create(s_ui.screen);
+  lv_obj_add_style(s_ui.airplay_label, &airplay_style, 0);
+  lv_label_set_text(s_ui.airplay_label, "AirPlay");
+  lv_obj_align(s_ui.airplay_label, LV_ALIGN_TOP_MID, 0, 24);
+  lv_obj_add_flag(s_ui.airplay_label, LV_OBJ_FLAG_HIDDEN);
 
-  s_right_bar = lv_obj_create(s_screen);
-  lv_obj_remove_style_all(s_right_bar);
-  lv_obj_set_style_radius(s_right_bar, 6, 0);
-  lv_obj_set_style_bg_opa(s_right_bar, LV_OPA_COVER, 0);
-  lv_obj_set_size(s_right_bar, 20, 8);
-  lv_obj_align(s_right_bar, LV_ALIGN_RIGHT_MID, -16, 0);
+  static lv_style_t omni_style;
+  lv_style_init(&omni_style);
+  lv_style_set_text_color(&omni_style, lv_color_hex(0x00D4AA));
+  lv_style_set_text_font(&omni_style, &lv_font_montserrat_14);
+  lv_style_set_text_align(&omni_style, LV_TEXT_ALIGN_CENTER);
+  lv_style_set_bg_opa(&omni_style, LV_OPA_TRANSP);
 
-  s_anim_timer = lv_timer_create(anim_timer_cb, 50, NULL);
-  s_initialized = true;
+  s_ui.omni_label = lv_label_create(s_ui.screen);
+  lv_obj_add_style(s_ui.omni_label, &omni_style, 0);
+  lv_label_set_text(s_ui.omni_label, "omni");
+  lv_obj_align(s_ui.omni_label, LV_ALIGN_BOTTOM_MID, 0, -24);
+  lv_obj_add_flag(s_ui.omni_label, LV_OBJ_FLAG_HIDDEN);
+
+  s_ui.initialized = true;
+  s_ui.state = SCREEN_UI_STATE_BOOT;
+  s_ui.voice_state = SCREEN_UI_VOICE_OFF;
+  s_ui.streaming = false;
+  s_ui.playing = false;
+
+  s_ui.anim_timer = lv_timer_create(anim_timer_cb,
+                                      (uint32_t)CONFIG_SCREEN_UI_ANIM_INTERVAL_MS, NULL);
+  if (s_ui.anim_timer) {
+    lv_timer_ready(s_ui.anim_timer);
+  }
+
   bsp_display_unlock();
 
-  ESP_LOGI(TAG, "screen UI initialized (Ultra-minimalist)");
+  ESP_LOGI(TAG, "screen UI initialized (AirPlay/omni labels)");
   return ESP_OK;
 }
 
+void screen_ui_set_voice_ptt_callback(void (*callback)(void)) {
+  s_ui.voice_ptt_callback = callback;
+}
+
+void screen_ui_set_voice_network_busy(bool busy) {
+  (void)busy;
+  if (!s_ui.initialized) return;
+}
+
 void screen_ui_deinit(void) {
-  if (!s_initialized) {
-    return;
-  }
-  if (!bsp_display_lock(0)) {
-    return;
+  if (!s_ui.initialized) return;
+  if (!bsp_display_lock(0)) return;
+
+  if (s_ui.anim_timer) {
+    lv_timer_delete(s_ui.anim_timer);
+    s_ui.anim_timer = NULL;
   }
 
-  if (s_anim_timer != NULL) {
-    lv_timer_del(s_anim_timer);
-    s_anim_timer = NULL;
+  if (s_ui.screen) {
+    lv_obj_clean(s_ui.screen);
   }
-  delete_obj(&s_left_bar);
-  delete_obj(&s_right_bar);
-  delete_obj(&s_lyric_label);
 
-  s_screen = NULL;
-  s_initialized = false;
+  memset(&s_ui, 0, sizeof(s_ui));
   bsp_display_unlock();
 }
 
 void screen_ui_set_state(screen_ui_state_t state, bool wifi_connected,
                          bool airplay_ready, bool streaming) {
-  s_state = state;
-  s_wifi_connected = wifi_connected;
-  s_airplay_ready = airplay_ready;
-  s_streaming = streaming;
+  (void)wifi_connected;
 
-  if (!s_initialized) {
+  s_ui.state = state;
+  s_ui.streaming = streaming;
+
+  if (!s_ui.initialized) return;
+
+  if (s_ui.voice_state != SCREEN_UI_VOICE_OFF) {
     return;
   }
-  if (!bsp_display_lock(0)) {
-    return;
-  }
+
+  if (!bsp_display_lock(pdMS_TO_TICKS(80))) return;
+  screen_ui_update_labels();
   bsp_display_unlock();
 }
 
 void screen_ui_set_metadata(const screen_ui_metadata_t *metadata) {
-  if (metadata == NULL) {
-    return;
-  }
+  (void)metadata;
+  if (!s_ui.initialized) return;
+}
 
-  memcpy(&s_metadata, metadata, sizeof(s_metadata));
-  s_metadata.title[SCREEN_UI_TEXT_MAX - 1] = '\0';
-  s_metadata.artist[SCREEN_UI_TEXT_MAX - 1] = '\0';
+void screen_ui_set_playing(bool playing) {
+  s_ui.playing = playing;
+  if (!s_ui.initialized) return;
+}
 
-  if (!s_initialized) {
-    return;
-  }
-  if (!bsp_display_lock(0)) {
-    return;
-  }
+void screen_ui_set_voice_state(screen_ui_voice_state_t state, const char *user_text,
+                               const char *assistant_text, const char *error_text) {
+  (void)user_text;
+  (void)assistant_text;
+  (void)error_text;
+
+  s_ui.voice_state = state;
+
+  if (!s_ui.initialized) return;
+  if (!s_ui.screen) return;
+  if (!bsp_display_lock(pdMS_TO_TICKS(80))) return;
+  screen_ui_update_labels();
   bsp_display_unlock();
 }

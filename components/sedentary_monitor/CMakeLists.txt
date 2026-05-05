@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "sedentary_monitor.c"
+        "sedentary_camera.c"
+        "sedentary_local_detect.c"
+        "sedentary_alert.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        airplay_core
+        audio_core
+        board_cores3
+        espressif__esp32-camera
+        esp_timer
+        nvs_flash
+        realtime_voice
+        screen_ui
+)

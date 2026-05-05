@@ -103,22 +103,44 @@ static bool aac_has_adts_header(const uint8_t *data, size_t len) {
   return len >= 2 && data[0] == 0xFF && (data[1] & 0xF0) == 0xF0;
 }
 
+static int sample_rate_to_freq_idx(int sample_rate) {
+  switch (sample_rate) {
+  case 96000: return 0;
+  case 88200: return 1;
+  case 64000: return 2;
+  case 48000: return 3;
+  case 44100: return 4;
+  case 32000: return 5;
+  case 24000: return 6;
+  case 22050: return 7;
+  case 16000: return 8;
+  case 12000: return 9;
+  case 11025: return 10;
+  case 8000:  return 11;
+  case 7350:  return 12;
+  default:    return 4;
+  }
+}
+
+static int channels_to_chan_cfg(int channels) {
+  if (channels <= 0) return 2;
+  if (channels > 2)  return 2;
+  return channels;
+}
+
 static void build_adts_header(uint8_t *header, size_t frame_len,
                               int sample_rate, int channels) {
-  (void)sample_rate;
-  (void)channels;
-
   int profile = 2;
-  int freq_idx = 4;
-  int chan_cfg = 2;
+  int freq_idx = sample_rate_to_freq_idx(sample_rate);
+  int chan_cfg = channels_to_chan_cfg(channels);
   int packet_len = (int)(frame_len + ADTS_HEADER_LEN);
 
   header[0] = 0xFF;
   header[1] = 0xF1;
-  header[2] = ((profile - 1) << 6) + (freq_idx << 2) + (chan_cfg >> 2);
-  header[3] = ((chan_cfg & 3) << 6) + (packet_len >> 11);
-  header[4] = (packet_len & 0x7FF) >> 3;
-  header[5] = ((packet_len & 7) << 5) + 0x1F;
+  header[2] = (uint8_t)(((profile - 1) << 6) + (freq_idx << 2) + (chan_cfg >> 2));
+  header[3] = (uint8_t)(((chan_cfg & 3) << 6) + (packet_len >> 11));
+  header[4] = (uint8_t)((packet_len & 0x7FF) >> 3);
+  header[5] = (uint8_t)(((packet_len & 7) << 5) + 0x1F);
   header[6] = 0xFC;
 }
 
@@ -246,9 +268,33 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
       return -1;
     }
 
-    return validate_decode_output(
+    int decoded_samples = validate_decode_output(
         dec_info.channel > 0 ? dec_info.channel : channels, channels,
         frame.decoded_size, output_capacity_samples, info);
+    
+    // 诊断：检查 ALAC 解码后的 PCM 是否为零
+    if (decoded_samples > 0) {
+      int16_t pcm_peak = 0;
+      size_t sample_count = (size_t)decoded_samples * (size_t)channels;
+      for (size_t i = 0; i < sample_count; i++) {
+        int32_t v = output[i];
+        int32_t mag = v < 0 ? -v : v;
+        if (mag > 32767) mag = 32767;
+        if ((int16_t)mag > pcm_peak) {
+          pcm_peak = (int16_t)mag;
+        }
+      }
+      
+      if (pcm_peak == 0) {
+        static uint32_t silent_alac_counter = 0;
+        if (++silent_alac_counter % 50 == 0) {
+          ESP_LOGW(TAG, "decoder_diag: ALAC decoded silent PCM pcm_peak=0 samples=%d count=%lu",
+                   decoded_samples, (unsigned long)silent_alac_counter);
+        }
+      }
+    }
+    
+    return decoded_samples;
   }
 
   if (decoder->kind == AUDIO_DECODER_AAC) {
@@ -296,9 +342,33 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
       return -1;
     }
 
-    return validate_decode_output(
+    int decoded_samples = validate_decode_output(
         dec_info.channel > 0 ? dec_info.channel : channels, channels,
         frame.decoded_size, output_capacity_samples, info);
+    
+    // 诊断：检查 AAC 解码后的 PCM 是否为零
+    if (decoded_samples > 0) {
+      int16_t pcm_peak = 0;
+      size_t sample_count = (size_t)decoded_samples * (size_t)channels;
+      for (size_t i = 0; i < sample_count; i++) {
+        int32_t v = output[i];
+        int32_t mag = v < 0 ? -v : v;
+        if (mag > 32767) mag = 32767;
+        if ((int16_t)mag > pcm_peak) {
+          pcm_peak = (int16_t)mag;
+        }
+      }
+      
+      if (pcm_peak == 0) {
+        static uint32_t silent_aac_counter = 0;
+        if (++silent_aac_counter % 50 == 0) {
+          ESP_LOGW(TAG, "decoder_diag: AAC decoded silent PCM pcm_peak=0 samples=%d count=%lu",
+                   decoded_samples, (unsigned long)silent_aac_counter);
+        }
+      }
+    }
+    
+    return decoded_samples;
   }
 
   return -1;

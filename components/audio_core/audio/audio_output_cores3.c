@@ -8,9 +8,11 @@
 #include "esp_codec_dev.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/semphr.h"
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #define TAG                "audio_output"
@@ -39,6 +41,61 @@ static bool s_output_muted = false;
 static int64_t s_last_ramp_update_us = 0;
 static bool s_hw_mute_applied = false;
 static bool s_hw_mute_state_init = false;
+/** Last values pushed to codec/AW88298; avoid redundant SPI when unchanged. */
+static bool s_hw_push_valid = false;
+static int s_hw_push_vol = 0;
+static bool s_hw_push_mute = false;
+static SemaphoreHandle_t s_owner_lock = NULL;
+static bool s_external_owner = false;
+static bool s_worker_was_running = false;
+static char s_owner_tag[24] = {0};
+
+static audio_output_ref_tap_fn s_ref_tap_fn = NULL;
+static void *s_ref_tap_ctx = NULL;
+static portMUX_TYPE s_ref_tap_spin = portMUX_INITIALIZER_UNLOCKED;
+
+/* ---- I2S bus state (RX + TX share one I2S peripheral on CoreS3) ---- */
+static i2s_bus_state_t s_i2s_state = I2S_BUS_IDLE;
+static bool s_i2s_rx_open = false;
+static bool s_i2s_tx_open = false;
+
+static void i2s_state_update(void) {
+    i2s_bus_state_t prev = s_i2s_state;
+    if (s_i2s_rx_open && s_i2s_tx_open)      s_i2s_state = I2S_BUS_FULL_DUPLEX;
+    else if (s_i2s_rx_open && !s_i2s_tx_open) s_i2s_state = I2S_BUS_RX_ONLY;
+    else if (!s_i2s_rx_open && s_i2s_tx_open) s_i2s_state = I2S_BUS_TX_ONLY;
+    else                                       s_i2s_state = I2S_BUS_IDLE;
+    if (s_i2s_state != prev) {
+        const char *names[] = { "IDLE", "RX_ONLY", "TX_ONLY", "FULL_DUPLEX" };
+        ESP_LOGI(TAG, "I2S bus: %s → %s (rx=%d tx=%d)",
+                 names[prev], names[s_i2s_state],
+                 s_i2s_rx_open ? 1 : 0, s_i2s_tx_open ? 1 : 0);
+    }
+}
+
+void audio_output_notify_i2s_rx(bool open) {
+    s_i2s_rx_open = open;
+    i2s_state_update();
+}
+
+void audio_output_notify_i2s_tx(bool open) {
+    s_i2s_tx_open = open;
+    i2s_state_update();
+}
+
+i2s_bus_state_t audio_output_get_i2s_state(void) { return s_i2s_state; }
+
+static bool owner_locked_by_external(void) {
+  bool locked = false;
+  if (s_owner_lock == NULL) {
+    return false;
+  }
+  if (xSemaphoreTake(s_owner_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+    locked = s_external_owner;
+    xSemaphoreGive(s_owner_lock);
+  }
+  return locked;
+}
 
 static float clamp_volume_db(float db) {
   if (db < VOLUME_MIN_DB) {
@@ -73,6 +130,8 @@ static int db_to_hw_volume(float db) {
   return hw;
 }
 
+static void hw_volume_push_cache_invalidate(void) { s_hw_push_valid = false; }
+
 static void apply_volume_step(bool force) {
   if (s_speaker_handle == NULL) {
     return;
@@ -102,16 +161,17 @@ static void apply_volume_step(bool force) {
       } else {
         s_hw_mute_applied = hw_mute;
         s_hw_mute_state_init = true;
-        ESP_LOGI(TAG, "Volume state sync: mute=%d target=%.1f cur=%.1f",
+        s_hw_push_mute = hw_mute;
+        ESP_LOGD(TAG, "Volume state sync: mute=%d target=%.1f cur=%.1f",
                  hw_mute ? 1 : 0, target_db, current_db);
       }
     }
     return;
   }
 
-  float next_db = current_db;
+  float next_db = force ? target_db : current_db;
   float diff = target_db - current_db;
-  if (fabsf(diff) > 0.0001f) {
+  if (!force && fabsf(diff) > 0.0001f) {
     if (diff > VOLUME_RAMP_STEP_DB) {
       next_db = current_db + VOLUME_RAMP_STEP_DB;
     } else if (diff < -VOLUME_RAMP_STEP_DB) {
@@ -123,6 +183,23 @@ static void apply_volume_step(bool force) {
 
   int hw_volume = db_to_hw_volume(next_db);
   bool hw_mute = muted || (next_db <= VOLUME_MIN_DB + 0.01f);
+  const bool same_hw =
+      s_hw_push_valid && hw_volume == s_hw_push_vol && hw_mute == s_hw_push_mute;
+  if (same_hw) {
+    portENTER_CRITICAL(&s_volume_lock);
+    s_current_volume_db = next_db;
+    s_last_ramp_update_us = now_us;
+    portEXIT_CRITICAL(&s_volume_lock);
+    s_hw_mute_applied = hw_mute;
+    s_hw_mute_state_init = true;
+    if (fabsf(target_db - next_db) > 4.0f) {
+      ESP_LOGW(TAG,
+               "Volume ramp lag: target=%.1f current=%.1f hw=%d mute=%d force=%d",
+               target_db, next_db, hw_volume, hw_mute ? 1 : 0, force ? 1 : 0);
+    }
+    return;
+  }
+
   int mute_ret = esp_codec_dev_set_out_mute(s_speaker_handle, hw_mute);
   int vol_ret = esp_codec_dev_set_out_vol(s_speaker_handle, hw_volume);
   if (mute_ret != ESP_CODEC_DEV_OK || vol_ret != ESP_CODEC_DEV_OK) {
@@ -137,6 +214,9 @@ static void apply_volume_step(bool force) {
   portEXIT_CRITICAL(&s_volume_lock);
   s_hw_mute_applied = hw_mute;
   s_hw_mute_state_init = true;
+  s_hw_push_vol = hw_volume;
+  s_hw_push_mute = hw_mute;
+  s_hw_push_valid = true;
 
   if (fabsf(target_db - next_db) > 4.0f) {
     ESP_LOGW(TAG,
@@ -169,6 +249,20 @@ static esp_err_t codec_write_checked(const void *data, size_t bytes) {
     return ESP_ERR_INVALID_ARG;
   }
 
+  audio_output_ref_tap_fn tap_fn = NULL;
+  void *tap_ctx = NULL;
+  portENTER_CRITICAL(&s_ref_tap_spin);
+  tap_fn = s_ref_tap_fn;
+  tap_ctx = s_ref_tap_ctx;
+  portEXIT_CRITICAL(&s_ref_tap_spin);
+  if (tap_fn != NULL && data != NULL && bytes >= sizeof(int16_t) * CORES3_CHANNELS) {
+    size_t frame_bytes = sizeof(int16_t) * CORES3_CHANNELS;
+    if ((bytes % frame_bytes) == 0U) {
+      size_t frames = bytes / frame_bytes;
+      tap_fn((const int16_t *)data, frames, s_output_rate, tap_ctx);
+    }
+  }
+
   int ret = esp_codec_dev_write(s_speaker_handle, (void *)data, (int)bytes);
   if (ret != ESP_CODEC_DEV_OK) {
     ESP_LOGE(TAG, "Speaker write failed (%d)", ret);
@@ -179,6 +273,9 @@ static esp_err_t codec_write_checked(const void *data, size_t bytes) {
 }
 
 static esp_err_t open_output(uint32_t rate) {
+  if (owner_locked_by_external()) {
+    return ESP_ERR_INVALID_STATE;
+  }
   int mclk_multiple = cores3_mclk_multiple_for_rate(rate);
   esp_codec_dev_sample_info_t sample_cfg = {
       .bits_per_sample = 16,
@@ -195,6 +292,7 @@ static esp_err_t open_output(uint32_t rate) {
   }
 
   if (s_output_open) {
+    hw_volume_push_cache_invalidate();
     esp_codec_dev_close(s_speaker_handle);
     s_output_open = false;
   }
@@ -209,6 +307,7 @@ static esp_err_t open_output(uint32_t rate) {
   s_output_rate = rate;
   s_output_mclk_multiple = mclk_multiple;
   s_output_open = true;
+  audio_output_notify_i2s_tx(true);
   ESP_LOGI(TAG,
            "CoreS3 speaker open: rate=%" PRIu32 " bits=%d channels=%d "
            "mask=0x%x mclk=%dx",
@@ -268,17 +367,50 @@ esp_err_t audio_output_init(void) {
   return ESP_OK;
 }
 
-void audio_output_start(void) { audio_output_common_start(); }
+void audio_output_start(void) {
+  if (owner_locked_by_external()) {
+    ESP_LOGW(TAG, "start ignored: speaker owned by %s", s_owner_tag);
+    return;
+  }
+  if (!s_output_open) {
+    if (open_output(s_output_rate) != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to open CoreS3 speaker path on start");
+      return;
+    }
+  }
+  audio_output_common_start();
+}
 
-void audio_output_stop(void) { audio_output_common_stop(); }
+void audio_output_stop(void) {
+  if (owner_locked_by_external()) {
+    return;
+  }
+  audio_output_common_stop();
+  if (s_output_open && s_speaker_handle != NULL) {
+    hw_volume_push_cache_invalidate();
+    int ret = esp_codec_dev_close(s_speaker_handle);
+    if (ret != ESP_CODEC_DEV_OK) {
+      ESP_LOGD(TAG, "Speaker close skipped (already closed: %d)", ret);
+    }
+    s_output_open = false;
+    audio_output_notify_i2s_tx(false);
+  }
+}
 
 esp_err_t audio_output_write(const void *data, size_t bytes, TickType_t wait) {
+  if (owner_locked_by_external()) {
+    return ESP_ERR_INVALID_STATE;
+  }
   (void)wait;
   apply_volume_step(false);
   return codec_write_checked(data, bytes);
 }
 
 void audio_output_set_sample_rate(uint32_t rate) {
+  if (owner_locked_by_external()) {
+    ESP_LOGW(TAG, "sample rate update ignored: speaker owned by %s", s_owner_tag);
+    return;
+  }
   ESP_LOGI(TAG, "Setting speaker sample rate to %" PRIu32 " Hz", rate);
   if (open_output(rate) != ESP_OK) {
     ESP_LOGW(TAG, "Failed to re-open CoreS3 speaker path");
@@ -334,6 +466,109 @@ audio_fidelity_mode_t audio_output_get_fidelity_mode(void) {
   return audio_output_common_get_fidelity_mode();
 }
 
+esp_err_t audio_output_acquire_external(const char *owner_tag, bool stop_worker) {
+  if (s_owner_lock == NULL) {
+    s_owner_lock = xSemaphoreCreateMutex();
+    if (s_owner_lock == NULL) {
+      return ESP_ERR_NO_MEM;
+    }
+  }
+  if (xSemaphoreTake(s_owner_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  if (s_external_owner) {
+    if (owner_tag != NULL && strncmp(s_owner_tag, owner_tag, sizeof(s_owner_tag)) == 0) {
+      if (stop_worker && audio_output_common_is_active()) {
+        s_worker_was_running = true;
+        xSemaphoreGive(s_owner_lock);
+        audio_output_common_stop();
+        ESP_LOGI(TAG, "speaker ownership escalated for %s (worker=stopped)",
+                 s_owner_tag[0] ? s_owner_tag : "external");
+        return ESP_OK;
+      }
+      xSemaphoreGive(s_owner_lock);
+      return ESP_OK;
+    }
+    xSemaphoreGive(s_owner_lock);
+    return ESP_ERR_INVALID_STATE;
+  }
+  s_external_owner = true;
+  s_owner_tag[0] = '\0';
+  if (owner_tag != NULL) {
+    snprintf(s_owner_tag, sizeof(s_owner_tag), "%s", owner_tag);
+  }
+  s_worker_was_running = stop_worker && audio_output_common_is_active();
+  xSemaphoreGive(s_owner_lock);
+
+  if (stop_worker) {
+    audio_output_common_stop();
+  }
+  ESP_LOGI(TAG, "speaker ownership acquired by %s (worker=%s, speaker_open=%d)",
+           s_owner_tag[0] ? s_owner_tag : "external",
+           stop_worker ? "stopped" : "kept", s_output_open ? 1 : 0);
+  return ESP_OK;
+}
+
+esp_err_t audio_output_release_external(const char *owner_tag, bool resume_worker) {
+  if (s_owner_lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (xSemaphoreTake(s_owner_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+  if (!s_external_owner) {
+    xSemaphoreGive(s_owner_lock);
+    return ESP_OK;
+  }
+  if (owner_tag != NULL && s_owner_tag[0] != '\0' &&
+      strncmp(s_owner_tag, owner_tag, sizeof(s_owner_tag)) != 0) {
+    xSemaphoreGive(s_owner_lock);
+    return ESP_ERR_INVALID_STATE;
+  }
+  bool should_resume = resume_worker && s_worker_was_running;
+  s_external_owner = false;
+  s_worker_was_running = false;
+  s_owner_tag[0] = '\0';
+  xSemaphoreGive(s_owner_lock);
+
+  if (should_resume) {
+    if (!s_output_open) {
+      open_output(s_output_rate);
+    }
+    audio_output_common_start();
+  }
+  ESP_LOGI(TAG, "speaker ownership released (resume_worker=%d, speaker_open=%d)",
+           should_resume ? 1 : 0, s_output_open ? 1 : 0);
+  return ESP_OK;
+}
+
+esp_err_t audio_output_get_external_owner(char *owner_tag, size_t owner_tag_len,
+                                          bool *owned) {
+  ESP_RETURN_ON_FALSE(owned != NULL, ESP_ERR_INVALID_ARG, TAG,
+                      "owned pointer is required");
+
+  *owned = false;
+  if (owner_tag != NULL && owner_tag_len > 0) {
+    owner_tag[0] = '\0';
+  }
+
+  if (s_owner_lock == NULL) {
+    return ESP_OK;
+  }
+  if (xSemaphoreTake(s_owner_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  *owned = s_external_owner;
+  if (owner_tag != NULL && owner_tag_len > 0 && s_external_owner) {
+    snprintf(owner_tag, owner_tag_len, "%s",
+             s_owner_tag[0] ? s_owner_tag : "external");
+  }
+
+  xSemaphoreGive(s_owner_lock);
+  return ESP_OK;
+}
+
 esp_err_t audio_output_get_diag(audio_output_diag_t *diag) {
   ESP_RETURN_ON_FALSE(diag != NULL, ESP_ERR_INVALID_ARG, TAG,
                       "diag pointer is required");
@@ -387,6 +622,10 @@ esp_err_t audio_output_play_test_tone(uint32_t frequency_hz, uint32_t duration_m
                                       uint8_t amplitude_pct) {
   ESP_RETURN_ON_FALSE(s_speaker_handle != NULL, ESP_ERR_INVALID_STATE, TAG,
                       "speaker handle unavailable");
+  if (owner_locked_by_external()) {
+    ESP_LOGW(TAG, "test tone blocked: speaker owned by %s", s_owner_tag);
+    return ESP_ERR_INVALID_STATE;
+  }
 
   if (frequency_hz == 0) {
     frequency_hz = 1000;
@@ -463,4 +702,34 @@ esp_err_t audio_output_play_test_tone(uint32_t frequency_hz, uint32_t duration_m
     audio_output_common_start();
   }
   return err;
+}
+
+void audio_output_set_ref_tap(audio_output_ref_tap_fn fn, void *ctx) {
+  portENTER_CRITICAL(&s_ref_tap_spin);
+  s_ref_tap_fn = fn;
+  s_ref_tap_ctx = ctx;
+  portEXIT_CRITICAL(&s_ref_tap_spin);
+}
+
+esp_err_t audio_output_get_mic_handle(void **out_handle) {
+  if (out_handle == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  void *handle = iot_board_get_handle(BOARD_AUDIO_MIC_ID);
+  if (handle == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  *out_handle = handle;
+  return ESP_OK;
+}
+
+esp_err_t audio_output_get_spk_handle(void **out_handle) {
+  if (out_handle == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (s_speaker_handle == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  *out_handle = (void *)s_speaker_handle;
+  return ESP_OK;
 }

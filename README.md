@@ -75,10 +75,12 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 
 ## 配置与凭证规则
 
-仓库默认只认这两个正式配置源：
+**PlatformIO（推荐）**：编辑 `config/config.toml`（从 [`config/config.toml.example`](config/config.toml.example) 复制）。`pio run` 前会运行 [`scripts/pio_prebuild.py`](scripts/pio_prebuild.py)，在项目根生成 **`sdkconfig.defaults`**（含 Wi‑Fi/语音等密钥，**勿提交**；已写入 `.gitignore`），并镜像到 `config/generated/sdkconfig.defaults` 便于对照。
 
-- [`sdkconfig.defaults`](sdkconfig.defaults)：跨板级的正式产品默认值
-- [`sdkconfig.defaults.m5cores3`](sdkconfig.defaults.m5cores3)：M5Stack CoreS3 的板级默认值
+**纯 ESP-IDF**：仍可显式传入多份默认值，例如：
+
+- [`sdkconfig.defaults`](sdkconfig.defaults)：跨板级的正式产品默认值（PIO 下由脚本生成）
+- [`sdkconfig.defaults.m5cores3`](sdkconfig.defaults.m5cores3)：M5Stack CoreS3 的板级默认值（若仍存在；否则以 `config.toml` 为准）
 
 Wi‑Fi 凭证视为**开发者预置**数据，不由设备上的 UI、SoftAP、USB/HTTP 管理面负责输入。
 
@@ -130,7 +132,7 @@ iPhone / iPad / Mac  ── Wi‑Fi ──►  ESP32‑S3 (Core S3)  ──►  
 | 构建与验收 | 构建、快速检查、lint 与本地验证步骤 | `docs/build-and-verify.md` |
 | 音频听感 QA | 人耳与运行时指标联合验收方法 | `docs/audio-fidelity-qa.md` |
 | 内存优化基线 | UI 移除、RAM 热点与运行时采样检查点 | `docs/optimization/memory-optimization-plan.md` |
-| 屏幕 UI 迁移 | Simulator 到设备屏幕的迁移策略与验收清单 | `docs/optimization/screen-ui-migration.md` |
+| 屏幕 UI 迁移 | Simulator 到设备屏幕的迁移策略与验收清单 | `docs/ui/screen-ui-migration-plan.md` |
 
 关键代码区域：
 

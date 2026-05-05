@@ -13,7 +13,7 @@
 #define AAC_FRAMES_PER_PACKET  352
 #define AUDIO_MAX_CHANNELS     2
 #define AUDIO_BYTES_PER_SAMPLE 2
-#define MAX_SAMPLES_PER_FRAME  4096
+#define MAX_SAMPLES_PER_FRAME  1024
 
 typedef struct __attribute__((packed)) {
   uint32_t rtp_timestamp;
@@ -22,7 +22,7 @@ typedef struct __attribute__((packed)) {
   uint8_t reserved;
 } audio_frame_header_t;
 
-#define MAX_RING_BUFFER_FRAMES 1000
+#define MAX_RING_BUFFER_FRAMES 256
 #define BYTES_PER_FRAME                                          \
   ((size_t)sizeof(audio_frame_header_t) +                        \
    ((size_t)AAC_FRAMES_PER_PACKET * (size_t)AUDIO_MAX_CHANNELS * \

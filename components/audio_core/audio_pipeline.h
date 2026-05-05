@@ -33,3 +33,5 @@ void audio_pipeline_flush(void);
 void audio_pipeline_note_playback_busy(uint32_t busy_us);
 void audio_pipeline_note_gap_concealment(bool burst_start);
 void audio_pipeline_get_snapshot(audio_pipeline_snapshot_t *snapshot);
+void audio_pipeline_note_input_frames(uint32_t frames);
+uint32_t audio_pipeline_get_input_frames(void);

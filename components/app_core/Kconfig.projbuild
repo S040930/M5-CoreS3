@@ -41,6 +41,13 @@ menu "Airplay ESP Configuration"
             range 80 2000
             default 240
 
+        config OUTPUT_MONO
+            bool "Mono output (downmix stereo to mono)"
+            default y
+            help
+                Downmix stereo to mono before I2S output.
+                Recommended for single-speaker devices like M5Stack CoreS3.
+
         choice OUTPUT_SAMPLE_RATE
             prompt "Output sample rate"
             default OUTPUT_SAMPLE_RATE_44100
@@ -60,7 +67,7 @@ menu "Airplay ESP Configuration"
         config RESAMPLER_TAPS
             int "Resampler filter taps"
             range 4 64
-            default 28 if IDF_TARGET_ESP32S3
+            default 48 if IDF_TARGET_ESP32S3
             default 16
             depends on OUTPUT_SAMPLE_RATE_48000
 
@@ -73,5 +80,364 @@ menu "Airplay ESP Configuration"
             config AUDIO_FIDELITY_MODE_ENHANCED
                 bool "Enhanced"
         endchoice
+    endmenu
+
+    menu "Realtime Voice"
+        config VOICE_MODE_DEFAULT_ENABLED
+            bool "Enable voice mode at boot"
+            default y
+
+        config VOICE_REALTIME_URL
+            string "Realtime API WebSocket URL"
+            default "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+
+        config VOICE_API_KEY
+            string "Realtime API key (Bearer token)"
+            default ""
+
+        config VOICE_MODEL
+            string "Realtime model"
+            default "qwen3.5-omni-flash-realtime"
+
+        config VOICE_TTS_VOICE
+            string "Assistant TTS voice name (DashScope)"
+            default "Ethan"
+            help
+                DashScope realtime session \"voice\" field, e.g. Ethan, Cherry.
+                Leave empty to omit the field.
+
+        config VOICE_ENABLE_INPUT_TRANSCRIPTION
+            bool "Enable optional realtime transcript events"
+            default y
+            help
+                Enables DashScope input_audio_transcription events for
+                compatibility. These events are not required for normal voice
+                operation, but they can be used to surface user transcripts in UI.
+
+        config VOICE_TOOLS_ENABLE
+            bool "DashScope Realtime tools (function calling)"
+            default n
+            help
+                Registers set_timer, cancel_timer, and get_device_status in session.update.
+                Per Alibaba docs, tools and enable_search must not be used together;
+                this firmware does not enable enable_search.
+
+        config VOICE_INPUT_TRANSCRIPTION_MODEL
+            string "Compatibility transcript model"
+            default "gummy-realtime-v1"
+            depends on VOICE_ENABLE_INPUT_TRANSCRIPTION
+            help
+                Model name used if the realtime session emits transcript events.
+
+        config VOICE_ACTIVATION_PHRASE_ENABLE
+            bool "Require local WakeNet activation phrase"
+            default y
+            help
+                Qwen Omni only starts a response after the local WakeNet model
+                detects the configured phrase. Forces client VAD (server VAD disabled).
+
+        choice VOICE_WAKE_MODEL
+            prompt "Wake word model"
+            default VOICE_WAKE_HIESP
+            depends on VOICE_ACTIVATION_PHRASE_ENABLE
+
+            config VOICE_WAKE_HIESP
+                bool "Hi ESP (wn9_hiesp)"
+            config VOICE_WAKE_NIHAOXIAOZHI
+                bool "你好小智 (wn9_nihaoxiaozhi_tts)"
+            config VOICE_WAKE_ALEXA
+                bool "Alexa (wn9_alexa)"
+            config VOICE_WAKE_JARVIS
+                bool "Jarvis (wn9_jarvis_tts)"
+            config VOICE_WAKE_HIJOY
+                bool "Hi Joy (wn9_hijoy_tts)"
+            config VOICE_WAKE_COMPUTER
+                bool "Computer (wn9_computer_tts)"
+        endchoice
+
+        config VOICE_ACTIVATION_PHRASE
+            string "Activation phrase label"
+            default "Hi ESP" if VOICE_WAKE_HIESP
+            default "你好小智" if VOICE_WAKE_NIHAOXIAOZHI
+            default "Alexa" if VOICE_WAKE_ALEXA
+            default "Jarvis" if VOICE_WAKE_JARVIS
+            default "Hi Joy" if VOICE_WAKE_HIJOY
+            default "Computer" if VOICE_WAKE_COMPUTER
+            depends on VOICE_ACTIVATION_PHRASE_ENABLE
+
+        config VOICE_DEBUG_EVENT_LOG
+            bool "Verbose voice event logging"
+            default y
+            help
+                Print periodic counters and event details for voice/transcription diagnostics.
+
+        config VOICE_APPEND_HEALTH_TIMEOUT_MS
+            int "Uplink append health timeout (ms)"
+            range 1000 60000
+            default 8000
+            help
+                After session becomes ready, if no input_audio_buffer.append is sent within
+                this timeout, report uplink stalled.
+
+        config VOICE_MIC_IN_GAIN_DB
+            int "Voice capture codec input gain (dB)"
+            range 0 42
+            default 33
+            help
+                ES7210 / codec analog gain after open. Higher values raise client VAD RMS;
+                keep within codec limits to avoid clipping.
+
+        config VOICE_CAPTURE_STALL_TIMEOUT_MS
+            int "Microphone capture stall timeout (ms)"
+            range 500 10000
+            default 2000
+            help
+                If no valid mic samples are received within this timeout, trigger mic reopen
+                recovery.
+
+        config VOICE_CAPTURE_RECOVERY_RETRY_MAX
+            int "Microphone capture recovery max retries"
+            range 1 10
+            default 3
+            help
+                Maximum consecutive mic reopen retries before entering capture stalled error.
+
+        config VOICE_CAPTURE_STALL_CYCLE_MAX
+            int "Microphone stall cycle escalation threshold"
+            range 1 50
+            default 6
+            help
+                Maximum consecutive stall-recovery cycles allowed before forcing
+                a cooldown and outer-loop recovery.
+
+        config VOICE_CAPTURE_RECOVERY_COOLDOWN_MS
+            int "Microphone recovery cooldown (ms)"
+            range 500 60000
+            default 3000
+            help
+                Backoff delay used when capture stalls keep repeating to avoid
+                tight reopen loops and log spam.
+
+        config VOICE_WS_CONNECT_TIMEOUT_MS
+            int "WebSocket connect timeout (ms)"
+            range 1000 120000
+            default 10000
+
+        config VOICE_WS_RETRY_BASE_MS
+            int "WebSocket reconnect base delay (ms)"
+            range 200 30000
+            default 1500
+
+        config VOICE_WS_RETRY_MAX_MS
+            int "WebSocket reconnect max delay (ms)"
+            range 500 120000
+            default 20000
+
+        config VOICE_WS_RETRY_JITTER_MS
+            int "WebSocket reconnect jitter (ms)"
+            range 0 5000
+            default 300
+
+        config VOICE_WS_PING_INTERVAL_SEC
+            int "WebSocket ping interval (sec)"
+            range 5 3600
+            default 30
+            help
+                WebSocket keep-alive ping interval. During idle periods (no speech),
+                no audio frames are sent, so the TCP path can become stale. A 30s
+                ping keeps the TLS connection alive through NAT/firewall timeouts.
+
+        config VOICE_WS_SEND_TIMEOUT_MS
+            int "WebSocket send timeout (ms)"
+            range 500 30000
+            default 5000
+            help
+                Timeout for each WebSocket send operation. Increase this if you
+                see transport_poll_write timeouts during audio upload. Must be
+                longer than the network round-trip under congestion.
+
+        config VOICE_INPUT_SAMPLE_RATE
+            int "Voice input sample rate"
+            range 8000 48000
+            default 16000
+
+        config VOICE_OUTPUT_SAMPLE_RATE
+            int "Voice output sample rate"
+            range 8000 48000
+            default 24000
+
+        config VOICE_UPLINK_FRAME_MS
+            int "Audio uplink frame duration (ms)"
+            range 10 200
+            default 40
+
+        config VOICE_VAD_SILENCE_TIMEOUT_MS
+            int "Voice VAD silence timeout (ms)"
+            range 100 5000
+            default 700
+
+        config VOICE_VAD_MIN_SPEECH_MS
+            int "Voice VAD minimum speech duration (ms)"
+            range 100 5000
+            default 350
+
+        config VOICE_VAD_CONSECUTIVE_FRAMES
+            int "VAD gate consecutive hits required"
+            range 1 10
+            default 2
+            help
+                Number of consecutive VADNet speech-active frames (from the AFE
+                pipeline on AEC-cleaned audio) before client VAD declares speech
+                started. Lower values catch short utterances but may increase
+                false triggers from transient noise.
+
+        config VOICE_SESSION_IDLE_TIMEOUT_MS
+            int "Voice session idle timeout (ms)"
+            range 1000 120000
+            default 15000
+
+        config VOICE_CONTEXT_MAX_CHARS
+            int "Voice context max chars"
+            range 64 1024
+            default 256
+
+        choice VOICE_PROMPT_PRESET
+            prompt "Voice prompt preset"
+            default VOICE_PROMPT_PRESET_BALANCED
+
+            config VOICE_PROMPT_PRESET_BALANCED
+                bool "Balanced default"
+            config VOICE_PROMPT_PRESET_CONVERSATIONAL
+                bool "More conversational"
+            config VOICE_PROMPT_PRESET_FACTUAL
+                bool "More factual"
+        endchoice
+
+        config VOICE_DEBUG_TLS_HEAP
+            bool "Log internal/DMA heap around WebSocket TLS connect"
+            default n
+            help
+                When enabled, logs largest free internal and DMA-capable blocks
+                before connect and when transport connects (debug spike hunting).
+    endmenu
+
+    menu "Sedentary monitor (GC0308 local occupancy)"
+        config SEDENTARY_ENABLE
+            bool "Enable sedentary desk monitor"
+            default n
+            help
+                Periodic GC0308 grayscale capture and local coarse occupancy vs an
+                empty-desk baseline (NVS calibration). No cloud vision. Stops when
+                disabled at build time; sedentary_monitor_set_enabled can pause at runtime.
+
+        config SEDENTARY_CAPTURE_INTERVAL_SEC
+            int "Capture interval (seconds)"
+            range 5 600
+            default 30
+            depends on SEDENTARY_ENABLE
+
+        config SEDENTARY_REMIND_AFTER_SEC
+            int "Remind after seated (seconds)"
+            range 60 86400
+            default 3600
+            depends on SEDENTARY_ENABLE
+
+        config SEDENTARY_ABSENCE_RESET_SEC
+            int "Absence streak to reset session (seconds)"
+            range 30 7200
+            default 600
+            depends on SEDENTARY_ENABLE
+
+        config SEDENTARY_REPEAT_INTERVAL_SEC
+            int "Repeat reminder while overdue (seconds)"
+            range 60 7200
+            default 900
+            depends on SEDENTARY_ENABLE
+
+        config SEDENTARY_FAIL_SUSPEND_COUNT
+            int "Consecutive failures before suspend"
+            range 1 50
+            default 5
+            depends on SEDENTARY_ENABLE
+
+        config SEDENTARY_SUSPEND_COOLDOWN_SEC
+            int "Cooldown before leaving SUSPENDED (seconds)"
+            range 30 3600
+            default 300
+            depends on SEDENTARY_ENABLE
+
+        config SEDENTARY_CAM_XCLK_GPIO
+            int "Camera XCLK GPIO (-1 if unused)"
+            range -1 48
+            default 15
+            depends on SEDENTARY_ENABLE
+            help
+                M5 docs list -1 for BSP-managed clock; plain IDF often needs a GPIO
+                (try 15). Adjust if your CoreS3 revision differs.
+
+        config SEDENTARY_VOICE_PROMPT
+            string "On-screen reminder line (default stand up)"
+            default "stand up"
+            depends on SEDENTARY_ENABLE
+            help
+                Fixed product copy for the sedentary alert overlay. Empty falls back to
+                stand up. Not generated by any LLM.
+
+        menu "Local coarse detection"
+            depends on SEDENTARY_ENABLE
+
+            config SEDENTARY_LOCAL_PRESENT_THRESHOLD
+                int "Mean abs ROI diff: start present streak when >= this"
+                range 2 100
+                default 12
+
+            config SEDENTARY_LOCAL_ABSENT_THRESHOLD
+                int "Mean abs ROI diff: start absent streak when <= this"
+                range 1 99
+                default 5
+
+            config SEDENTARY_LOCAL_PRESENT_CONFIRM_COUNT
+                int "Consecutive present-like frames to confirm PRESENT"
+                range 1 20
+                default 3
+
+            config SEDENTARY_LOCAL_ABSENT_CONFIRM_COUNT
+                int "Consecutive absent-like frames to confirm ABSENT"
+                range 1 20
+                default 3
+
+            config SEDENTARY_LOCAL_ROI_MARGIN_PX
+                int "Expand calibrated ROI by this many pixels"
+                range 0 48
+                default 8
+
+            config SEDENTARY_LOCAL_ENABLE_CALIBRATION
+                bool "Require NVS two-step calibration (empty desk then seated)"
+                default y
+                help
+                    When enabled, run sedentary_calibration_begin_empty then
+                    sedentary_calibration_begin_present once before normal detection.
+
+            config SEDENTARY_LOCAL_RECAL_ON_BOOT
+                bool "Erase sedentary NVS calibration on each boot"
+                default n
+        endmenu
+    endmenu
+
+    menu "Screen UI"
+        config SCREEN_UI_ANIM_INTERVAL_MS
+            int "LVGL animation timer period (ms)"
+            range 8 100
+            default 33
+            help
+                Lower values increase UI smoothness but raise CPU load on CoreS3.
+
+        config SCREEN_UI_ANIM_STRESS_INTERVAL_MS
+            int "Animation period during voice TLS/Web load (ms)"
+            range 20 500
+            default 200
+            help
+                While realtime voice is opening a TLS/WebSocket, the UI timer is
+                stretched to this period to free CPU1 for IDLE and internal heap.
     endmenu
 endmenu

@@ -15,6 +15,8 @@ typedef struct rtsp_conn rtsp_conn_t;
  * Connection state struct - consolidates all session state
  */
 struct rtsp_conn {
+  char device_name[65];
+
   // Volume control: Q15 fixed-point (0-32768)
   // 32768 = 0 dB (unity), 0 = mute
   volatile int32_t volume_q15;

@@ -1,12 +1,17 @@
 #include "app_core.h"
 
 #include "airplay_service.h"
+#include "iot_board.h"
 #include "audio/audio_stream.h"
+#include "config_hash.h"
 #include "nvs_flash.h"
+#include "realtime_voice.h"
+#include "sedentary_monitor.h"
 #include "receiver_state.h"
 #include "screen_ui.h"
 #include "settings.h"
 #include "wifi.h"
+#include "wifi_credentials.h"
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -19,36 +24,19 @@
 static const char *TAG = "app_core";
 static const int64_t RESOURCE_LOG_INTERVAL_US = 30000000LL;
 
-static bool s_airplay_started = false;
-
-static screen_ui_state_t map_screen_state(receiver_state_t state) {
-  switch (state) {
-  case RECEIVER_STATE_BOOT:
-    return SCREEN_UI_STATE_BOOT;
-  case RECEIVER_STATE_CONFIG_REQUIRED:
-    return SCREEN_UI_STATE_CONFIG_REQUIRED;
-  case RECEIVER_STATE_NETWORK_READY:
-    return SCREEN_UI_STATE_NETWORK_READY;
-  case RECEIVER_STATE_DISCOVERABLE:
-    return SCREEN_UI_STATE_DISCOVERABLE;
-  case RECEIVER_STATE_SESSION_ESTABLISHING:
-    return SCREEN_UI_STATE_SESSION_ESTABLISHING;
-  case RECEIVER_STATE_STREAMING:
-    return SCREEN_UI_STATE_STREAMING;
-  case RECEIVER_STATE_RECOVERING:
-    return SCREEN_UI_STATE_RECOVERING;
-  case RECEIVER_STATE_FAULT:
-  default:
-    return SCREEN_UI_STATE_FAULT;
-  }
+static void app_core_on_airplay_active(bool active) {
+  realtime_voice_on_airplay_state_changed(active);
 }
+
+static bool s_airplay_started = false;
+static bool s_voice_started = false;
 
 static void push_screen_ui_state(void) {
   receiver_state_snapshot_t snapshot;
   receiver_state_get_snapshot(&snapshot);
 
   screen_ui_set_state(
-      map_screen_state(snapshot.state), snapshot.network_ready,
+      receiver_state_map_screen_ui(snapshot.state), snapshot.network_ready,
       snapshot.discoverable || snapshot.session_establishing || snapshot.streaming,
       snapshot.streaming);
 }
@@ -65,10 +53,16 @@ static void log_runtime_resources(const char *reason) {
 
 static esp_err_t start_airplay_services(void) {
   if (s_airplay_started) {
+    ESP_LOGI(TAG, "AirPlay start skipped: already started");
+    airplay_service_set_active_callback(app_core_on_airplay_active);
+    airplay_service_refresh_playback();
     return ESP_OK;
   }
 
-  esp_err_t err = airplay_service_start();
+  char device_name[65];
+  settings_get_device_name(device_name, sizeof(device_name));
+  ESP_LOGI(TAG, "Starting AirPlay service for device: %s", device_name);
+  esp_err_t err = airplay_service_start(device_name);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "AirPlay service start failed: %s", esp_err_to_name(err));
     receiver_state_set_recovering(true);
@@ -77,7 +71,9 @@ static esp_err_t start_airplay_services(void) {
 
   s_airplay_started = true;
   receiver_state_set_recovering(false);
-  ESP_LOGI(TAG, "AirPlay ready");
+  airplay_service_set_active_callback(app_core_on_airplay_active);
+  airplay_service_refresh_playback();
+  ESP_LOGI(TAG, "AirPlay ready (mDNS published + RTSP listening)");
   return ESP_OK;
 }
 
@@ -89,6 +85,104 @@ static void stop_airplay_services(void) {
   airplay_service_stop();
   s_airplay_started = false;
   ESP_LOGI(TAG, "AirPlay stopped");
+}
+
+static void load_voice_config(void) {
+  realtime_voice_config_t cfg = {0};
+  bool from_nvs = true;
+
+  if (settings_get_voice_api_key(cfg.api_key, sizeof(cfg.api_key)) != ESP_OK) {
+    from_nvs = false;
+    cfg.api_key[0] = '\0';
+  }
+  if (settings_get_voice_url(cfg.url, sizeof(cfg.url)) != ESP_OK) {
+    from_nvs = false;
+    cfg.url[0] = '\0';
+  }
+  if (settings_get_voice_model(cfg.model, sizeof(cfg.model)) != ESP_OK) {
+    from_nvs = false;
+    cfg.model[0] = '\0';
+  }
+
+  /* Fall back to compile-time defaults for any missing NVS fields. */
+  if (cfg.url[0] == '\0' && strlen(CONFIG_VOICE_REALTIME_URL) > 0) {
+    snprintf(cfg.url, sizeof(cfg.url), "%s", CONFIG_VOICE_REALTIME_URL);
+  }
+  if (cfg.model[0] == '\0' && strlen(CONFIG_VOICE_MODEL) > 0) {
+    snprintf(cfg.model, sizeof(cfg.model), "%s", CONFIG_VOICE_MODEL);
+  }
+  if (cfg.api_key[0] == '\0' && strlen(CONFIG_VOICE_API_KEY) > 0) {
+    snprintf(cfg.api_key, sizeof(cfg.api_key), "%s", CONFIG_VOICE_API_KEY);
+  }
+  realtime_voice_set_config(&cfg);
+
+  if (realtime_voice_config_ready()) {
+    ESP_LOGI(TAG, "Voice config loaded (%s)", from_nvs ? "NVS" : "compile-time defaults");
+  } else {
+    ESP_LOGW(TAG, "Voice config incomplete: API key not set. "
+                  "Use settings API or menuconfig to configure.");
+  }
+}
+
+static void provision_voice_config_if_needed(void) {
+  /* If NVS has no voice config but compile-time values exist, seed NVS. */
+  if (settings_has_voice_config()) {
+    return;
+  }
+  bool any_written = false;
+  if (strlen(CONFIG_VOICE_REALTIME_URL) > 0) {
+    settings_set_voice_url(CONFIG_VOICE_REALTIME_URL);
+    any_written = true;
+  }
+  if (strlen(CONFIG_VOICE_MODEL) > 0) {
+    settings_set_voice_model(CONFIG_VOICE_MODEL);
+    any_written = true;
+  }
+  if (strlen(CONFIG_VOICE_API_KEY) > 0) {
+    settings_set_voice_api_key(CONFIG_VOICE_API_KEY);
+    any_written = true;
+  }
+  if (any_written) {
+    ESP_LOGI(TAG, "Provisioned compile-time voice config into NVS");
+  }
+}
+
+static void start_voice_services(void) {
+  if (s_voice_started) {
+    return;
+  }
+  load_voice_config();
+  esp_err_t board_err = iot_board_init();
+  if (board_err != ESP_OK) {
+    ESP_LOGW(TAG, "Voice requires board init: %s", esp_err_to_name(board_err));
+    return;
+  }
+  esp_err_t err = realtime_voice_start();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Realtime voice start failed: %s", esp_err_to_name(err));
+    return;
+  }
+  realtime_voice_set_enabled(CONFIG_VOICE_MODE_DEFAULT_ENABLED);
+  s_voice_started = true;
+  if (sedentary_monitor_start() != ESP_OK) {
+    ESP_LOGW(TAG, "Sedentary monitor start skipped or failed");
+  }
+}
+
+static void stop_voice_services(void) {
+  if (!s_voice_started) {
+    return;
+  }
+  sedentary_monitor_stop();
+  realtime_voice_stop();
+  s_voice_started = false;
+}
+
+static void reconcile_voice_mode(void) {
+  receiver_state_snapshot_t snapshot;
+  receiver_state_get_snapshot(&snapshot);
+  bool airplay_active = snapshot.session_establishing || snapshot.streaming;
+  realtime_voice_on_airplay_state_changed(airplay_active);
 }
 
 static void network_monitor_task(void *pvParameters) {
@@ -107,18 +201,27 @@ static void network_monitor_task(void *pvParameters) {
     bool has_network = wifi_is_connected();
     receiver_state_set_network_ready(has_network);
     push_screen_ui_state();
+    reconcile_voice_mode();
+    airplay_service_refresh_playback();
 
     if (has_network && !had_network) {
       receiver_state_set_config_required(false);
       receiver_state_set_recovering(false);
       start_airplay_services();
+      start_voice_services();
+      reconcile_voice_mode();
+      airplay_service_refresh_playback();
       log_runtime_resources("wifi_connected");
     } else if (!has_network && had_network) {
       receiver_state_set_recovering(true);
+      stop_voice_services();
       stop_airplay_services();
       log_runtime_resources("wifi_disconnected");
     } else if (has_network && !s_airplay_started) {
       start_airplay_services();
+      start_voice_services();
+      reconcile_voice_mode();
+      airplay_service_refresh_playback();
     }
 
     int64_t now_us = esp_timer_get_time();
@@ -150,7 +253,7 @@ static esp_err_t provision_wifi_credentials_if_needed(void) {
   }
 
   esp_err_t err =
-      settings_set_wifi_credentials(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
+      wifi_creds_save(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to provision compile-time Wi-Fi credentials: %s",
              esp_err_to_name(err));
@@ -165,8 +268,30 @@ static esp_err_t provision_wifi_credentials_if_needed(void) {
 void app_core_run(void) {
   receiver_state_init();
   receiver_state_dispatch(RECEIVER_EVENT_BOOT);
+  /* Suppress noisy SPI master debug logs that are unrelated to voice input */
+  esp_log_level_set("spi_master", ESP_LOG_WARN);
+  /* Avoid leaking Authorization headers from esp_websocket_client debug logs. */
+  esp_log_level_set("transport_ws", ESP_LOG_WARN);
+  /* Suppress noisy component logs to focus on microphone diagnostics */
+  esp_log_level_set("wifi", ESP_LOG_WARN);
+  esp_log_level_set("event", ESP_LOG_WARN);
+  esp_log_level_set("esp-netif", ESP_LOG_WARN);
+  esp_log_level_set("esp_netif_lwip", ESP_LOG_WARN);
+  esp_log_level_set("RANDOM", ESP_LOG_WARN);
+  esp_log_level_set(" Stations", ESP_LOG_WARN);
+  esp_log_level_set("wifi:bcnd", ESP_LOG_WARN);
+  esp_log_level_set("transport", ESP_LOG_WARN);
+  esp_log_level_set("esp-tls", ESP_LOG_WARN);
+  esp_log_level_set("i2s_common", ESP_LOG_INFO);
+  esp_log_level_set("I2S_IF", ESP_LOG_INFO);
+  esp_log_level_set("ES7210", ESP_LOG_INFO);
+  esp_log_level_set("Adev_Codec", ESP_LOG_INFO);
+  esp_log_level_set("realtime_voice", ESP_LOG_INFO);
+
   if (screen_ui_init() != ESP_OK) {
     ESP_LOGW(TAG, "screen UI init failed; continuing without local display");
+  } else {
+    screen_ui_set_voice_ptt_callback(realtime_voice_notify_user_speech_start);
   }
   push_screen_ui_state();
   log_runtime_resources("boot");
@@ -187,6 +312,10 @@ void app_core_run(void) {
     return;
   }
 
+  ESP_LOGI(TAG, "config build hash: %s", CONFIG_BUILD_HASH);
+
+  provision_voice_config_if_needed();
+
   ret = provision_wifi_credentials_if_needed();
   if (ret != ESP_OK) {
     receiver_state_set_faulted(true);
@@ -200,7 +329,7 @@ void app_core_run(void) {
   }
   log_runtime_resources("post_audio_prealloc");
 
-  if (!settings_has_wifi_credentials()) {
+  if (!wifi_creds_have()) {
     ESP_LOGW(TAG, "No Wi-Fi credentials configured; staying idle");
     receiver_state_set_config_required(true);
     receiver_state_set_network_ready(false);
@@ -218,6 +347,9 @@ void app_core_run(void) {
     if (wifi_wait_connected(30000)) {
       receiver_state_set_network_ready(true);
       start_airplay_services();
+      start_voice_services();
+      reconcile_voice_mode();
+      airplay_service_refresh_playback();
       push_screen_ui_state();
       log_runtime_resources("startup_connected");
     } else {
@@ -229,10 +361,14 @@ void app_core_run(void) {
     BaseType_t ok =
         xTaskCreate(network_monitor_task, "net_mon", 4096, NULL, 5, NULL);
     if (ok != pdPASS) {
-      ESP_LOGE(TAG, "Failed to start network monitor");
-      receiver_state_set_faulted(true);
+      ESP_LOGW(
+          TAG,
+          "Failed to start network monitor (int_free=%lu largest=%lu), "
+          "running monitor in app_core task",
+          (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+          (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
       push_screen_ui_state();
-      return;
+      network_monitor_task(NULL);
     }
   }
 

@@ -6,6 +6,7 @@
 #include "audio_buffer.h"
 #include "audio_decoder.h"
 #include "audio_receiver_internal.h"
+#include "esp_log.h"
 
 static bool apply_aac_transient_mute(audio_receiver_state_t *state,
                                      int16_t *buffer, size_t samples,
@@ -71,6 +72,29 @@ bool audio_stream_process_frame(audio_receiver_state_t *state,
 
   apply_aac_transient_mute(state, decode_buffer, (size_t)decoded_samples,
                            channels);
+
+  // 诊断：入队前检查帧是否为静音
+  {
+    int16_t frame_peak = 0;
+    size_t sample_count = (size_t)decoded_samples * (size_t)channels;
+    for (size_t i = 0; i < sample_count; i++) {
+      int32_t v = decode_buffer[i];
+      int32_t mag = v < 0 ? -v : v;
+      if (mag > 32767) mag = 32767;
+      if ((int16_t)mag > frame_peak) {
+        frame_peak = (int16_t)mag;
+      }
+    }
+    
+    if (frame_peak == 0) {
+      static uint32_t silent_frame_counter = 0;
+      if (++silent_frame_counter % 50 == 0) {
+        ESP_LOGW("audio_stream", 
+                 "stream_diag: silent frame before queue rtp=%u samples=%d peak=0 count=%lu",
+                 timestamp, decoded_samples, (unsigned long)silent_frame_counter);
+      }
+    }
+  }
 
   return audio_buffer_queue_decoded(&state->buffer, &state->stats, timestamp,
                                     decode_buffer, (size_t)decoded_samples,

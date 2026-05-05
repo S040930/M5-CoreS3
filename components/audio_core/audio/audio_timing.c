@@ -46,7 +46,7 @@
 #define POST_FLUSH_SYNC_FREEZE_US 3000000LL
 #define NTP_REFRESH_OFFSET_THRESHOLD_NS 2000000LL
 
-static const char *TAG = "audio_time";
+static const char *TAG = "audio_timing";
 // consecutive_early_frames resets on seek/discontinuity (see anchor_rtp_discontinuity)
 // and in audio_timing_reset / force_local_anchor, not on every 0xD4 refresh.
 
@@ -265,16 +265,6 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   timing->post_flush_ntp_offset_ns = 0;
 
   if (pending_capacity > 0) {
-    timing->pending_frame = (uint8_t *)heap_caps_malloc(pending_capacity,
-                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!timing->pending_frame) {
-      timing->pending_frame = (uint8_t *)malloc(pending_capacity);
-      if (!timing->pending_frame) {
-        ESP_LOGE(TAG, "Failed to allocate pending_frame (PSRAM and DRAM exhausted)");
-        timing->pending_frame_capacity = 0;
-        return;
-      }
-    }
     timing->pending_frame_capacity = pending_capacity;
   } else {
     timing->pending_frame_capacity = 0;
@@ -293,6 +283,10 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->ntp_offset_sane = true;
   timing->pending_valid = false;
   timing->pending_frame_len = 0;
+  if (timing->pending_frame) {
+    heap_caps_free(timing->pending_frame);
+    timing->pending_frame = NULL;
+  }
   timing->ready_time_us = 0;
   timing->consecutive_early_frames = 0;
   timing->consecutive_late_frames = 0;
@@ -911,12 +905,23 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                        early_count, early_us / 1000LL, buffered_frames,
                        timing->pending_valid ? 1 : 0);
             }
-            if (!from_pending && timing->pending_frame &&
+            if (!from_pending &&
                 item_size <= timing->pending_frame_capacity) {
-              memcpy(timing->pending_frame, item, item_size);
-              timing->pending_frame_len = item_size;
-              timing->pending_valid = true;
-              audio_buffer_return(buffer, item);
+              if (!timing->pending_frame) {
+                timing->pending_frame = (uint8_t *)heap_caps_malloc(
+                    timing->pending_frame_capacity,
+                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!timing->pending_frame) {
+                  timing->pending_frame = (uint8_t *)malloc(
+                      timing->pending_frame_capacity);
+                }
+              }
+              if (timing->pending_frame) {
+                memcpy(timing->pending_frame, item, item_size);
+                timing->pending_frame_len = item_size;
+                timing->pending_valid = true;
+                audio_buffer_return(buffer, item);
+              }
             }
             memset(out, 0, samples * channels * sizeof(int16_t));
             return samples;

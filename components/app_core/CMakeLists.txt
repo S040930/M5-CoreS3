@@ -8,5 +8,7 @@ idf_component_register(
         audio_core
         network_core
         screen_ui
+        realtime_voice
+        sedentary_monitor
         nvs_flash
 )

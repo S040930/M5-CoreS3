@@ -1,48 +1,6 @@
 #pragma once
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-
-/**
- * RTSP event system - Observer pattern for playback state changes.
- * Allows multiple listeners to react to RTSP events without coupling.
- */
-
-typedef enum {
-  RTSP_EVENT_CLIENT_CONNECTED,
-  RTSP_EVENT_PLAYING,
-  RTSP_EVENT_PAUSED,
-  RTSP_EVENT_DISCONNECTED,
-  RTSP_EVENT_METADATA,
-} rtsp_event_t;
-
-// ============================================================================
-// Metadata Event Data
-// ============================================================================
-
-#define METADATA_STRING_MAX 64
-
-typedef struct {
-  char title[METADATA_STRING_MAX];  // Track title (DMAP minm / bplist itemName)
-  char artist[METADATA_STRING_MAX]; // Artist name (DMAP asar / bplist
-                                    // artistName)
-  char album[METADATA_STRING_MAX];  // Album name (DMAP asal / bplist albumName)
-  char genre[METADATA_STRING_MAX];  // Genre (DMAP asgn)
-  uint32_t duration_secs;           // Total track duration in seconds
-  uint32_t position_secs;           // Current playback position in seconds
-  bool has_artwork;                 // Whether artwork is available
-  void *artwork_data;               // Pointer to JPEG artwork data
-  size_t artwork_len;               // Size of artwork data
-} rtsp_metadata_t;
-
-// ============================================================================
-// Event Data Union
-// ============================================================================
-
-typedef union {
-  rtsp_metadata_t metadata; // Valid when event == RTSP_EVENT_METADATA
-} rtsp_event_data_t;
+#include "rtsp_handler_common.h"
 
 /**
  * Event callback function type.
@@ -75,11 +33,3 @@ void rtsp_events_unregister(rtsp_event_callback_t callback);
  * @param data  Event-specific data (NULL for events with no data)
  */
 void rtsp_events_emit(rtsp_event_t event, const rtsp_event_data_t *data);
-
-/**
- * Format seconds as mm:ss string.
- * @param seconds Time in seconds
- * @param out Output buffer (at least 8 bytes for "999:59\0")
- * @param out_size Size of output buffer
- */
-void rtsp_format_time_mmss(uint32_t seconds, char *out, size_t out_size);

@@ -7,9 +7,10 @@
 
 #include "mdns_airplay.h"
 #include "wifi.h"
-#include "settings.h"
 
 static const char *TAG = "mdns_airplay";
+static bool s_mdns_inited = false;
+static bool s_raop_added = false;
 
 #define AIRPLAY_PROTOCOL_VERSION "1"
 #define AIRPLAY_SOURCE_VERSION "377.40.00"
@@ -59,15 +60,14 @@ static void build_mdns_hostname(const char *device_name, char *hostname,
   hostname[out] = '\0';
 }
 
-esp_err_t mdns_airplay_init(void) {
+esp_err_t mdns_airplay_init(const char *device_name) {
   char mac_str[18];
   char device_id[18];
   char service_name[80];
-  char device_name[65];
   char hostname[65];
 
-  // Get device name and MAC
-  settings_get_device_name(device_name, sizeof(device_name));
+  if (!device_name) return ESP_ERR_INVALID_ARG;
+
   build_mdns_hostname(device_name, hostname, sizeof(hostname));
   wifi_get_mac_str(mac_str, sizeof(mac_str));
   strncpy(device_id, mac_str, sizeof(device_id));
@@ -84,13 +84,17 @@ esp_err_t mdns_airplay_init(void) {
     ESP_LOGE(TAG, "mDNS init failed: %s", esp_err_to_name(err));
     return err;
   }
+  s_mdns_inited = true;
 
-  ESP_LOGI(TAG, "mDNS hostname: %s (device name: %s)", hostname, device_name);
+  ESP_LOGI(TAG, "mDNS hostname: %s (device name: %s)", hostname, device_name ? device_name : "(null)");
   err = mdns_hostname_set(hostname);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to set mDNS hostname: %s", esp_err_to_name(err));
     return err;
   }
+
+  // Avoid duplicate _raop registration after reconnect/restart cycles.
+  (void)mdns_service_remove("_raop", "_tcp");
 
   // ========================================
   // _raop._tcp service (port 7000)
@@ -118,6 +122,28 @@ esp_err_t mdns_airplay_init(void) {
   if (err_raop != ESP_OK) {
     ESP_LOGE(TAG, "Failed to add _raop._tcp service: %s",
              esp_err_to_name(err_raop));
+  } else {
+    s_raop_added = true;
+    ESP_LOGI(TAG, "_raop._tcp published on port 7000 as %s", service_name);
   }
   return err_raop;
+}
+
+void mdns_airplay_deinit(void) {
+  if (s_raop_added) {
+    esp_err_t remove_err = mdns_service_remove("_raop", "_tcp");
+    if (remove_err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to remove _raop._tcp: %s",
+               esp_err_to_name(remove_err));
+    } else {
+      ESP_LOGI(TAG, "_raop._tcp removed");
+    }
+    s_raop_added = false;
+  }
+
+  if (s_mdns_inited) {
+    mdns_free();
+    s_mdns_inited = false;
+    ESP_LOGI(TAG, "mDNS deinitialized");
+  }
 }

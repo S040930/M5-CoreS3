@@ -4,6 +4,12 @@ idf_component_register(
         "receiver_state.c"
         "rtsp/rtsp_conn.c"
         "rtsp/rtsp_events.c"
+        "rtsp/rtsp_handler_announce.c"
+        "rtsp/rtsp_handler_common.c"
+        "rtsp/rtsp_handler_metadata.c"
+        "rtsp/rtsp_handler_options.c"
+        "rtsp/rtsp_handler_record.c"
+        "rtsp/rtsp_handler_setup.c"
         "rtsp/rtsp_handlers.c"
         "rtsp/rtsp_message.c"
         "rtsp/rtsp_rsa.c"
@@ -28,6 +34,4 @@ idf_component_register(
         esp_wifi
 )
 
-target_include_directories(${COMPONENT_LIB} PRIVATE
-    "${PROJECT_DIR}/components/app_core"
-)
+# ── Removed: target_include_directories for app_core (layering: Layer 3 → Layer 4 violation)
