@@ -2,7 +2,7 @@
 # 复制此文件为 config/config.toml 并填入真实的配置
 #
 # 编辑 config/config.toml 后直接运行 `pio run`
-# 脚本会自动生成 config/generated/sdkconfig.defaults
+# 脚本会自动生成 config/generated/sdkconfig.defaults，根目录不再保留 sdkconfig.defaults
 
 [meta]
 name = "cores3-airplay-core"
@@ -37,8 +37,8 @@ force_v1 = true
 # 音频输出
 # =========================================================================
 [audio.output]
-target_latency_ms = 150
-max_buffer_ms = 300
+target_latency_ms = 400
+max_buffer_ms = 600
 sample_rate_hz = 44100
 mono_downmix = true
 fidelity_mode = "pure"
@@ -50,14 +50,13 @@ taps = 28
 realtime_buffer_count = 2
 
 # =========================================================================
-# 实时语音 (Qwen Omni / DashScope)
+# 实时语音 (Qwen Omni / DashScope HTTP Chat Completions)
 # =========================================================================
 [voice]
 enabled_at_boot = true
-url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = "YOUR_DASHSCOPE_API_KEY"
-model = "qwen3.5-omni-flash-realtime"
-tts_voice = "Ethan"
+model = "qwen3.5-omni-flash"
 input_sample_rate = 16000
 output_sample_rate = 24000
 uplink_frame_ms = 40
@@ -74,6 +73,7 @@ enabled = true
 [voice.activation]
 enabled = true
 phrase = "Hi ESP"
+followup_window_ms = 60000
 # AFE (Audio Front-End): always-on pipeline that bundles AEC + nsnet1 + AGC +
 # VADNet + WakeNet. The legacy "afe_enabled" toggle and "rms_threshold" knob
 # have been removed; VADNet on the AEC-cleaned signal is the only client VAD.
@@ -103,14 +103,6 @@ recovery_retry_max = 3
 stall_cycle_max = 6
 recovery_cooldown_ms = 3000
 
-[voice.websocket]
-connect_timeout_ms = 25000
-retry_base_ms = 1500
-retry_max_ms = 20000
-retry_jitter_ms = 300
-ping_interval_sec = 30
-send_timeout_ms = 5000
-
 # =========================================================================
 # 久坐监测（GC0308 本地粗检测 + 本地提醒，与 Realtime Voice 分离；不依赖网络）
 # =========================================================================
@@ -133,6 +125,25 @@ absent_confirm_count = 3
 roi_margin_px = 8
 enable_calibration = true
 recalibrate_on_boot = false
+
+# =========================================================================
+# ENV.3 环境提醒（SHT30 + QMP6988 本地判断，气压仅记录）
+# =========================================================================
+[env]
+enabled = true
+poll_interval_sec = 30
+cooldown_sec = 900
+temp_hysteresis_c = 1
+humidity_hysteresis_pct = 3
+summer_temp_min_c = 23
+summer_temp_max_c = 28
+summer_humidity_min_pct = 40
+summer_humidity_max_pct = 80
+winter_temp_min_c = 20
+winter_temp_max_c = 25
+winter_humidity_min_pct = 30
+winter_humidity_max_pct = 60
+debug_log = true
 
 # =========================================================================
 # 系统级

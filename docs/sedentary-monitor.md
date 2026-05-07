@@ -9,7 +9,7 @@ The on-screen / alert line is fixed to product copy **`stand up`** by default (`
 
 ## Configuration
 - **Example TOML**: [`config/config.toml.example`](../config/config.toml.example) — `[sedentary]` and `[sedentary.local]`.
-- **Pre-build**: [`scripts/pio_prebuild.py`](../scripts/pio_prebuild.py) maps keys → `CONFIG_SEDENTARY_*` and `CONFIG_SEDENTARY_LOCAL_*` in root `sdkconfig.defaults`.
+- **Pre-build**: [`scripts/pio_prebuild.py`](../scripts/pio_prebuild.py) maps keys → `CONFIG_SEDENTARY_*` and `CONFIG_SEDENTARY_LOCAL_*` in `config/generated/sdkconfig.defaults`.
 - **Menu**: `Airplay ESP Configuration -> Sedentary monitor (GC0308 local occupancy)` in [`components/app_core/Kconfig.projbuild`](../components/app_core/Kconfig.projbuild).
 
 Build-time gate: `SEDENTARY_ENABLE` must be **y** for camera and detection code. `sedentary_monitor_set_enabled()` can pause logic at runtime without rebuilding.

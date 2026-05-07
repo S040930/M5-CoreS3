@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/pk.h"
@@ -188,7 +189,8 @@ int rsa_apple_challenge_response(const char *challenge_b64, uint32_t ip_addr,
   mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_NONE);
 
   size_t rsa_len = mbedtls_rsa_get_len(rsa);
-  uint8_t *rsa_out = malloc(rsa_len);
+  uint8_t *rsa_out = heap_caps_malloc(rsa_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!rsa_out) rsa_out = malloc(rsa_len);
   if (!rsa_out) {
     return -1;
   }

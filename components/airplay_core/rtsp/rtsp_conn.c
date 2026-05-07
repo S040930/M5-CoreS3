@@ -6,13 +6,16 @@
 #include <unistd.h>
 
 #include "audio_volume.h"
+#include "esp_heap_caps.h"
 
 static int32_t volume_db_to_q15(float volume_db) {
   return audio_volume_db_to_q15(volume_db);
 }
 
 rtsp_conn_t *rtsp_conn_create(void) {
-  rtsp_conn_t *conn = calloc(1, sizeof(rtsp_conn_t));
+  rtsp_conn_t *conn = heap_caps_malloc(sizeof(rtsp_conn_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!conn) conn = heap_caps_malloc(sizeof(rtsp_conn_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (conn) memset(conn, 0, sizeof(rtsp_conn_t));
   if (!conn) {
     return NULL;
   }

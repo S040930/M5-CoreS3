@@ -5,6 +5,7 @@
 #include "audio_decoder.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 #include "alac_magic_cookie.h"
 #include "decoder/impl/esp_aac_dec.h"
@@ -149,7 +150,9 @@ audio_decoder_t *audio_decoder_create(const audio_decoder_config_t *config) {
     return NULL;
   }
 
-  audio_decoder_t *decoder = calloc(1, sizeof(*decoder));
+  audio_decoder_t *decoder = heap_caps_malloc(sizeof(*decoder), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!decoder) decoder = heap_caps_malloc(sizeof(*decoder), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (decoder) memset(decoder, 0, sizeof(*decoder));
   if (!decoder) {
     return NULL;
   }

@@ -1,14 +1,18 @@
 #include "app_core.h"
 
 #include "airplay_service.h"
+#include "auto_brightness.h"
+#include "bsp/display.h"
 #include "iot_board.h"
 #include "audio/audio_stream.h"
 #include "config_hash.h"
 #include "nvs_flash.h"
 #include "realtime_voice.h"
-#include "sedentary_monitor.h"
 #include "receiver_state.h"
+#include "env_monitor.h"
+#include "resource/resource_manager.h"
 #include "screen_ui.h"
+#include "sedentary_monitor.h"
 #include "settings.h"
 #include "wifi.h"
 #include "wifi_credentials.h"
@@ -16,6 +20,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -23,9 +28,67 @@
 
 static const char *TAG = "app_core";
 static const int64_t RESOURCE_LOG_INTERVAL_US = 30000000LL;
+static StaticTask_t s_net_mon_tcb;
+static StackType_t *s_net_mon_stack = NULL;
+#define NET_MON_STACK_SIZE 4096
+#if CONFIG_FREERTOS_UNICORE
+#define NET_MON_TASK_CORE 0
+#else
+#define NET_MON_TASK_CORE 0
+#endif
 
 static void app_core_on_airplay_active(bool active) {
   realtime_voice_on_airplay_state_changed(active);
+}
+
+static void app_core_on_resource_event(resource_event_t event, void *ctx) {
+  (void)ctx;
+  switch (event) {
+  case RESOURCE_EVENT_VOICE_STARTED:
+    ESP_LOGI(TAG, "resource event: voice started");
+    break;
+  case RESOURCE_EVENT_VOICE_STOPPED:
+    ESP_LOGI(TAG, "resource event: voice stopped");
+    break;
+  case RESOURCE_EVENT_AIRPLAY_STARTED:
+    ESP_LOGI(TAG, "resource event: airplay started");
+    break;
+  case RESOURCE_EVENT_AIRPLAY_STOPPED:
+    ESP_LOGI(TAG, "resource event: airplay stopped");
+    break;
+  }
+}
+
+static screen_ui_voice_state_t realtime_to_screen_voice_state(int state) {
+  switch ((realtime_voice_state_t)state) {
+  case REALTIME_VOICE_STATE_STANDBY:    return SCREEN_UI_VOICE_STANDBY;
+  case REALTIME_VOICE_STATE_CONNECTING: return SCREEN_UI_VOICE_CONNECTING;
+  case REALTIME_VOICE_STATE_LISTENING:  return SCREEN_UI_VOICE_LISTENING;
+  case REALTIME_VOICE_STATE_SENDING:    return SCREEN_UI_VOICE_SENDING;
+  case REALTIME_VOICE_STATE_THINKING:   return SCREEN_UI_VOICE_THINKING;
+  case REALTIME_VOICE_STATE_SPEAKING:   return SCREEN_UI_VOICE_SPEAKING;
+  case REALTIME_VOICE_STATE_ERROR:      return SCREEN_UI_VOICE_ERROR;
+  case REALTIME_VOICE_STATE_OFF:
+  default:                              return SCREEN_UI_VOICE_OFF;
+  }
+}
+
+static void voice_ui_state_bridge(int state, const char *user, const char *assistant, const char *error) {
+  screen_ui_set_voice_state(realtime_to_screen_voice_state(state), user, assistant, error);
+}
+
+static void voice_ui_network_busy_bridge(bool busy) {
+  screen_ui_set_voice_network_busy(busy);
+}
+
+static void network_query_for_voice(voice_network_snapshot_t *out) {
+  receiver_state_snapshot_t snap;
+  receiver_state_get_snapshot(&snap);
+  out->faulted = snap.faulted;
+  out->config_required = snap.config_required;
+  out->recovering = snap.recovering;
+  out->network_ready = snap.network_ready;
+  out->discoverable = snap.discoverable;
 }
 
 static bool s_airplay_started = false;
@@ -164,6 +227,9 @@ static void start_voice_services(void) {
   }
   realtime_voice_set_enabled(CONFIG_VOICE_MODE_DEFAULT_ENABLED);
   s_voice_started = true;
+  if (env_monitor_start() != ESP_OK) {
+    ESP_LOGW(TAG, "Env monitor start skipped or failed");
+  }
   if (sedentary_monitor_start() != ESP_OK) {
     ESP_LOGW(TAG, "Sedentary monitor start skipped or failed");
   }
@@ -173,6 +239,7 @@ static void stop_voice_services(void) {
   if (!s_voice_started) {
     return;
   }
+  env_monitor_stop();
   sedentary_monitor_stop();
   realtime_voice_stop();
   s_voice_started = false;
@@ -197,6 +264,16 @@ static void network_monitor_task(void *pvParameters) {
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(2000));
+
+    static int64_t s_last_netmon_stack_log_us = 0;
+    int64_t now_stack_us = esp_timer_get_time();
+    if ((now_stack_us - s_last_netmon_stack_log_us) >= 30000000LL) {
+      s_last_netmon_stack_log_us = now_stack_us;
+      UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+      ESP_LOGI(TAG, "stack watermark[net_mon]: free_words=%lu free_bytes=%lu",
+               (unsigned long)watermark,
+               (unsigned long)(watermark * sizeof(StackType_t)));
+    }
 
     bool has_network = wifi_is_connected();
     receiver_state_set_network_ready(has_network);
@@ -267,12 +344,11 @@ static esp_err_t provision_wifi_credentials_if_needed(void) {
 
 void app_core_run(void) {
   receiver_state_init();
+  resource_manager_init();
+  resource_manager_register_callback(app_core_on_resource_event, NULL);
   receiver_state_dispatch(RECEIVER_EVENT_BOOT);
   /* Suppress noisy SPI master debug logs that are unrelated to voice input */
   esp_log_level_set("spi_master", ESP_LOG_WARN);
-  /* Avoid leaking Authorization headers from esp_websocket_client debug logs. */
-  esp_log_level_set("transport_ws", ESP_LOG_WARN);
-  /* Suppress noisy component logs to focus on microphone diagnostics */
   esp_log_level_set("wifi", ESP_LOG_WARN);
   esp_log_level_set("event", ESP_LOG_WARN);
   esp_log_level_set("esp-netif", ESP_LOG_WARN);
@@ -293,6 +369,21 @@ void app_core_run(void) {
   } else {
     screen_ui_set_voice_ptt_callback(realtime_voice_notify_user_speech_start);
   }
+  {
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    esp_err_t ab_err = i2c_master_get_bus_handle(CONFIG_BSP_I2C_NUM, &i2c_bus);
+    if (ab_err == ESP_OK && i2c_bus != NULL) {
+      ab_err = auto_brightness_start(i2c_bus, bsp_display_brightness_set);
+      if (ab_err != ESP_OK) {
+        ESP_LOGW(TAG, "auto brightness start failed: %s", esp_err_to_name(ab_err));
+      }
+    } else {
+      ESP_LOGW(TAG, "I2C bus handle unavailable, auto brightness skipped");
+    }
+  }
+  realtime_voice_set_ui_state_cb(voice_ui_state_bridge);
+  realtime_voice_set_ui_network_busy_cb(voice_ui_network_busy_bridge);
+  realtime_voice_set_network_query_cb(network_query_for_voice);
   push_screen_ui_state();
   log_runtime_resources("boot");
 
@@ -347,8 +438,7 @@ void app_core_run(void) {
     if (wifi_wait_connected(30000)) {
       receiver_state_set_network_ready(true);
       start_airplay_services();
-      start_voice_services();
-      reconcile_voice_mode();
+      /* AirPlay-only mode: keep voice stack disabled. */
       airplay_service_refresh_playback();
       push_screen_ui_state();
       log_runtime_resources("startup_connected");
@@ -358,9 +448,20 @@ void app_core_run(void) {
       log_runtime_resources("startup_wait_connect_timeout");
     }
 
-    BaseType_t ok =
-        xTaskCreate(network_monitor_task, "net_mon", 4096, NULL, 5, NULL);
-    if (ok != pdPASS) {
+    if (!s_net_mon_stack) {
+      s_net_mon_stack = heap_caps_malloc(NET_MON_STACK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (!s_net_mon_stack) {
+        s_net_mon_stack = heap_caps_malloc(NET_MON_STACK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      }
+    }
+    TaskHandle_t net_mon_handle = NULL;
+    if (s_net_mon_stack) {
+      net_mon_handle = xTaskCreateStaticPinnedToCore(
+          network_monitor_task, "net_mon",
+          NET_MON_STACK_SIZE / sizeof(StackType_t), NULL, 5,
+          s_net_mon_stack, &s_net_mon_tcb, NET_MON_TASK_CORE);
+    }
+    if (net_mon_handle == NULL) {
       ESP_LOGW(
           TAG,
           "Failed to start network monitor (int_free=%lu largest=%lu), "

@@ -1,7 +1,8 @@
 #include "voice_dsp.h"
+#include "voice_common.h"
+#include "voice_playout.h"
 
 #include "audio/audio_output_common.h"
-#include "driver/i2s_std.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -10,6 +11,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 static const char *TAG = "voice_dsp";
 
@@ -36,33 +38,6 @@ static void voice_rs_float_mtx_ensure(void) {
 static double s_cap_ratio = 1.0;
 static double s_play_ratio = 1.0;
 
-void *voice_buf_alloc(size_t bytes) {
-  void *p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (p == NULL) {
-    p = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
-  }
-  return p;
-}
-
-void voice_buf_free(void *p) {
-  if (p != NULL) {
-    heap_caps_free(p);
-  }
-}
-
-int voice_hw_mclk_multiple(uint32_t rate) {
-  switch (rate) {
-  case 44100:
-  case 88200:
-  case 176400:
-    return I2S_MCLK_MULTIPLE_384;
-  default:
-    return 0;
-  }
-}
-
-uint32_t voice_hw_codec_rate_hz(void) { return (uint32_t)AO_OUTPUT_RATE; }
-
 static void voice_rs_free_float_bufs_locked(void) {
   voice_buf_free(s_rs_f_in);
   s_rs_f_in = NULL;
@@ -84,15 +59,33 @@ void voice_rs_free_float_bufs(void) {
 }
 
 static bool voice_rs_ensure_float_bufs(size_t in_samples, size_t out_samples) {
+  if (in_samples > (SIZE_MAX / sizeof(float)) || out_samples > (SIZE_MAX / sizeof(float))) {
+    ESP_LOGE(TAG, "resampler float buffer size overflow: in=%lu out=%lu",
+             (unsigned long)in_samples, (unsigned long)out_samples);
+    return false;
+  }
+
   if (in_samples > s_rs_f_in_cap) {
+    float *new_in = (float *)voice_buf_alloc(in_samples * sizeof(float));
+    if (new_in == NULL) {
+      ESP_LOGW(TAG, "resampler input float alloc failed: samples=%lu old_cap=%lu",
+               (unsigned long)in_samples, (unsigned long)s_rs_f_in_cap);
+      return false;
+    }
     voice_buf_free(s_rs_f_in);
+    s_rs_f_in = new_in;
     s_rs_f_in_cap = in_samples;
-    s_rs_f_in = (float *)voice_buf_alloc(s_rs_f_in_cap * sizeof(float));
   }
   if (out_samples > s_rs_f_out_cap) {
+    float *new_out = (float *)voice_buf_alloc(out_samples * sizeof(float));
+    if (new_out == NULL) {
+      ESP_LOGW(TAG, "resampler output float alloc failed: samples=%lu old_cap=%lu",
+               (unsigned long)out_samples, (unsigned long)s_rs_f_out_cap);
+      return false;
+    }
     voice_buf_free(s_rs_f_out);
+    s_rs_f_out = new_out;
     s_rs_f_out_cap = out_samples;
-    s_rs_f_out = (float *)voice_buf_alloc(s_rs_f_out_cap * sizeof(float));
   }
   return s_rs_f_in != NULL && s_rs_f_out != NULL;
 }
@@ -157,7 +150,10 @@ bool voice_rs_cap_ensure(void) {
 
 bool voice_rs_play_ensure(void) {
   uint32_t hw = voice_hw_codec_rate_hz();
-  uint32_t api = (uint32_t)CONFIG_VOICE_OUTPUT_SAMPLE_RATE;
+  uint32_t api = voice_playout_stream_format().sample_rate_hz;
+  if (api == 0) {
+    api = (uint32_t)CONFIG_VOICE_OUTPUT_SAMPLE_RATE;
+  }
   if (hw == api) {
     voice_rs_destroy_play();
     return true;
@@ -190,7 +186,7 @@ double voice_rs_play_ratio(void) { return s_play_ratio; }
 
 size_t voice_rs_output_cap(size_t in_frames, double ratio) {
   double scaled = ceil((double)in_frames * ratio);
-  size_t cap = (size_t)scaled + (size_t)(VOICE_DSP_RS_TAPS * 4U) + 64U;
+  size_t cap = (size_t)scaled + (size_t)(VOICE_DSP_RS_TAPS * 2U) + 32U;
   if (cap < in_frames) {
     cap = in_frames;
   }

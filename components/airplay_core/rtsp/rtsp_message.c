@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "socket_utils.h"
 
 static const char *TAG = "rtsp_message";
@@ -161,7 +162,8 @@ static int build_and_send_response(int socket, rtsp_conn_t *conn,
                                    const char *header, int header_len,
                                    const uint8_t *body, size_t body_len) {
   size_t total_len = (size_t)header_len + body_len;
-  uint8_t *response = malloc(total_len);
+  uint8_t *response = heap_caps_malloc(total_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!response) response = malloc(total_len);
   if (!response) {
     ESP_LOGE(TAG, "Failed to allocate response buffer");
     return -1;

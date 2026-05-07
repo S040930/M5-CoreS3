@@ -98,7 +98,8 @@ esp_err_t afe_bridge_init(const char *wakenet_model_name)
     }
 
     (void)s_afe_iface->add_wakenet_model(s_afe_data, wakenet_model_name);
-    s_afe_iface->set_wakenet_threshold(s_afe_data, 1, 0.5f);
+    /* Slightly lower wake threshold to improve far-field / low-volume pickup. */
+    s_afe_iface->set_wakenet_threshold(s_afe_data, 1, 0.42f);
 
     int feed_ch  = s_afe_iface->get_feed_chunksize(s_afe_data);
     int fetch_ch = s_afe_iface->get_fetch_chunksize(s_afe_data);

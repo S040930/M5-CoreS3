@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "audio_output.h"
@@ -311,7 +312,9 @@ sdp_parse_result_t rtsp_parse_sdp(rtsp_conn_t *conn, const char *sdp,
   if (!conn || !sdp || len == 0) {
     return SDP_PARSE_INVALID_BODY;
   }
-  char *sdp_buf = calloc(1, len + 1);
+  char *sdp_buf = heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!sdp_buf) sdp_buf = malloc(len + 1);
+  if (sdp_buf) memset(sdp_buf, 0, len + 1);
   if (!sdp_buf) {
     return SDP_PARSE_INVALID_BODY;
   }

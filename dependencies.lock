@@ -143,16 +143,6 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.7.2
-  espressif/esp_websocket_client:
-    component_hash: 3fb288702517ef4d75bf933a115f1056ee0c2540d964f9e1d856e0bb67e1dfeb
-    dependencies:
-    - name: idf
-      require: private
-      version: '>=5.0'
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.7.0
   espressif/libsodium:
     component_hash: 6ee084dee7a4d664498274870aa65391c9ec9d38dcdb34d2ad2b8518726f8b5e
     dependencies:
@@ -221,11 +211,10 @@ direct_dependencies:
 - espressif/esp32-camera
 - espressif/esp_audio_codec
 - espressif/esp_lvgl_port
-- espressif/esp_websocket_client
 - espressif/libsodium
 - espressif/m5stack_core_s3
 - espressif/mdns
 - lvgl/lvgl
-manifest_hash: 5a2dcb1821a547fad9153607b5f7d038206769b922186363e351e9468d8977d4
+manifest_hash: 3634ac93f5075de71d84a3fc4c1a6b4fe69f7c6408e633594026e6950f38d1f9
 target: esp32s3
 version: 2.0.0

@@ -65,7 +65,6 @@ CONFIG_MAP = {
     "voice.url":                       ("CONFIG_VOICE_REALTIME_URL",      _quoted),
     "voice.api_key":                   ("CONFIG_VOICE_API_KEY",           _quoted),
     "voice.model":                     ("CONFIG_VOICE_MODEL",             _quoted),
-    "voice.tts_voice":                 ("CONFIG_VOICE_TTS_VOICE",         _quoted),
     "voice.input_sample_rate":         ("CONFIG_VOICE_INPUT_SAMPLE_RATE", _int_str),
     "voice.output_sample_rate":        ("CONFIG_VOICE_OUTPUT_SAMPLE_RATE", _int_str),
     "voice.uplink_frame_ms":           ("CONFIG_VOICE_UPLINK_FRAME_MS",   _int_str),
@@ -91,8 +90,24 @@ CONFIG_MAP = {
     "sedentary.local.enable_calibration": ("CONFIG_SEDENTARY_LOCAL_ENABLE_CALIBRATION", _bool_y),
     "sedentary.local.recalibrate_on_boot": ("CONFIG_SEDENTARY_LOCAL_RECAL_ON_BOOT", _bool_y),
 
+    "env.enabled":                    ("CONFIG_ENV_MONITOR_ENABLE", _bool_y),
+    "env.poll_interval_sec":          ("CONFIG_ENV_MONITOR_POLL_INTERVAL_SEC", _int_str),
+    "env.cooldown_sec":               ("CONFIG_ENV_MONITOR_COOLDOWN_SEC", _int_str),
+    "env.temp_hysteresis_c":          ("CONFIG_ENV_TEMP_HYSTERESIS_C", _int_str),
+    "env.humidity_hysteresis_pct":    ("CONFIG_ENV_HUMIDITY_HYSTERESIS_PCT", _int_str),
+    "env.summer_temp_min_c":          ("CONFIG_ENV_SUMMER_TEMP_MIN_C", _int_str),
+    "env.summer_temp_max_c":          ("CONFIG_ENV_SUMMER_TEMP_MAX_C", _int_str),
+    "env.summer_humidity_min_pct":    ("CONFIG_ENV_SUMMER_HUMIDITY_MIN_PCT", _int_str),
+    "env.summer_humidity_max_pct":    ("CONFIG_ENV_SUMMER_HUMIDITY_MAX_PCT", _int_str),
+    "env.winter_temp_min_c":          ("CONFIG_ENV_WINTER_TEMP_MIN_C", _int_str),
+    "env.winter_temp_max_c":          ("CONFIG_ENV_WINTER_TEMP_MAX_C", _int_str),
+    "env.winter_humidity_min_pct":    ("CONFIG_ENV_WINTER_HUMIDITY_MIN_PCT", _int_str),
+    "env.winter_humidity_max_pct":    ("CONFIG_ENV_WINTER_HUMIDITY_MAX_PCT", _int_str),
+    "env.debug_log":                  ("CONFIG_ENV_MONITOR_DEBUG_LOG", _bool_y),
+
     "voice.activation.enabled":         ("CONFIG_VOICE_ACTIVATION_PHRASE_ENABLE", _bool_y),
     "voice.activation.phrase":          ("CONFIG_VOICE_ACTIVATION_PHRASE", _quoted),
+    "voice.activation.followup_window_ms": ("CONFIG_VOICE_ACTIVATION_FOLLOWUP_WINDOW_MS", _int_str),
     "voice.vad.silence_timeout_ms":    ("CONFIG_VOICE_VAD_SILENCE_TIMEOUT_MS", _int_str),
     "voice.vad.min_speech_ms":         ("CONFIG_VOICE_VAD_MIN_SPEECH_MS", _int_str),
     "voice.vad.consecutive_frames":    ("CONFIG_VOICE_VAD_CONSECUTIVE_FRAMES", _int_str),
@@ -109,13 +124,6 @@ CONFIG_MAP = {
     "voice.capture.recovery_retry_max": ("CONFIG_VOICE_CAPTURE_RECOVERY_RETRY_MAX", _int_str),
     "voice.capture.stall_cycle_max":    ("CONFIG_VOICE_CAPTURE_STALL_CYCLE_MAX", _int_str),
     "voice.capture.recovery_cooldown_ms": ("CONFIG_VOICE_CAPTURE_RECOVERY_COOLDOWN_MS", _int_str),
-
-    "voice.websocket.connect_timeout_ms": ("CONFIG_VOICE_WS_CONNECT_TIMEOUT_MS", _int_str),
-    "voice.websocket.retry_base_ms":    ("CONFIG_VOICE_WS_RETRY_BASE_MS", _int_str),
-    "voice.websocket.retry_max_ms":     ("CONFIG_VOICE_WS_RETRY_MAX_MS",  _int_str),
-    "voice.websocket.retry_jitter_ms":  ("CONFIG_VOICE_WS_RETRY_JITTER_MS", _int_str),
-    "voice.websocket.ping_interval_sec": ("CONFIG_VOICE_WS_PING_INTERVAL_SEC", _int_str),
-    "voice.websocket.send_timeout_ms":   ("CONFIG_VOICE_WS_SEND_TIMEOUT_MS", _int_str),
 
     "system.cpu_freq_mhz":             ("__SYSTEM_CPU_FREQ_MHZ_PLACEHOLDER__", _int_str),
     "system.monitor_baud":             ("CONFIG_ESPTOOLPY_MONITOR_BAUD",   _int_str),
@@ -302,13 +310,14 @@ STATIC_DEFAULTS = [
     "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384",
     "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096",
     "CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y",
+    "CONFIG_LWIP_UDP_RECVMBOX_SIZE=64",
+    "CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64",
+    "CONFIG_LWIP_TCP_RECVMBOX_SIZE=32",
     "CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096",
     "CONFIG_PARTITION_TABLE_CUSTOM=y",
     'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="components/board_cores3/partitions.csv"',
     "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
     "CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK=y",
-    "CONFIG_ESP_WS_CLIENT_ENABLE_DYNAMIC_BUFFER=y",
-    "CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y",
     "CONFIG_SR_WN_WN9_HIESP=y",
     # TLS encrypt from PSRAM + HW AES-DMA can exhaust internal DMA bounce buffers; software AES avoids it.
     "# CONFIG_MBEDTLS_HARDWARE_AES is not set",
@@ -517,35 +526,39 @@ def _main():
 
     content = "\n".join(STATIC_DEFAULTS + config_lines) + "\n"
 
-    gen_dir = os.path.join(project_dir, "config", "generated")
-    os.makedirs(gen_dir, exist_ok=True)
-
     # Must match PlatformIO env folder `.pio/build/<PIOENV>/`, not hardware `meta.board`.
     pio_env = os.environ.get("PIOENV")
     build_subdir = pio_env if pio_env else "m5cores3"
     build_dir = os.path.join(project_dir, ".pio", "build", build_subdir)
     sdkconfig_path = os.path.join(build_dir, "sdkconfig")
 
-    root_defaults = os.path.join(project_dir, "sdkconfig.defaults")
-    gen_defaults = os.path.join(gen_dir, "sdkconfig.defaults")
+    gen_dir = os.path.join(project_dir, "config", "generated")
+    os.makedirs(gen_dir, exist_ok=True)
 
-    changed_root = _write_if_changed(root_defaults, content)
+    gen_defaults = os.path.join(gen_dir, "sdkconfig.defaults")
+    root_defaults = os.path.join(project_dir, "sdkconfig.defaults")
+
     changed_gen = _write_if_changed(gen_defaults, content)
+    if os.path.exists(root_defaults):
+        try:
+            os.remove(root_defaults)
+        except OSError as exc:
+            print("  [config] WARNING: could not remove %s: %s" % (root_defaults, exc))
     stale_voice = _voice_defaults_mismatch_defaults_vs_sdkconfig(content, sdkconfig_path)
 
-    if changed_root or changed_gen or stale_voice:
+    if changed_gen or stale_voice:
         if os.path.isfile(sdkconfig_path):
             try:
                 os.remove(sdkconfig_path)
             except OSError as exc:
                 print("  [config] WARNING: could not remove %s: %s" % (sdkconfig_path, exc))
-        if changed_root or changed_gen:
-            print("  [config] config.toml -> sdkconfig.defaults (root + config/generated/); "
-                  "sdkconfig cleared for regen")
+        if changed_gen:
+            print("  [config] config.toml -> config/generated/sdkconfig.defaults; "
+                  "root sdkconfig.defaults removed; sdkconfig cleared for regen")
         elif stale_voice:
             print("  [config] voice keys in sdkconfig out of sync with defaults; sdkconfig cleared")
     else:
-        print("  [config] sdkconfig.defaults unchanged; voice keys match built sdkconfig")
+        print("  [config] config/generated/sdkconfig.defaults unchanged; voice keys match built sdkconfig")
 
     _write_config_hash(project_dir, content)
     _cleanup_nonessential_dirs(project_dir)

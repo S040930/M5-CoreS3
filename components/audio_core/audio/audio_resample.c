@@ -7,6 +7,7 @@
 #include "resampler.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <stdlib.h>
 
 static const char *TAG = "audio_resample";
@@ -32,12 +33,14 @@ static void ensure_float_bufs(size_t in_samples, size_t out_samples) {
   if (in_samples > float_in_cap) {
     free(float_in);
     float_in_cap = in_samples;
-    float_in = malloc(float_in_cap * sizeof(float));
+    float_in = heap_caps_malloc(float_in_cap * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!float_in) float_in = malloc(float_in_cap * sizeof(float));
   }
   if (out_samples > float_out_cap) {
     free(float_out);
     float_out_cap = out_samples;
-    float_out = malloc(float_out_cap * sizeof(float));
+    float_out = heap_caps_malloc(float_out_cap * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!float_out) float_out = malloc(float_out_cap * sizeof(float));
   }
 }
 

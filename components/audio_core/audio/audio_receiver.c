@@ -278,6 +278,10 @@ uint32_t audio_receiver_get_buffered_frames(void) {
   return (uint32_t)audio_buffer_get_frame_count(&receiver.buffer);
 }
 
+uint32_t audio_receiver_get_target_buffer_frames(void) {
+  return receiver.timing.target_buffer_frames;
+}
+
 void audio_receiver_get_active_codec(char *codec, size_t len) {
   if (!codec || len == 0 || !receiver.stream) {
     return;
@@ -302,6 +306,16 @@ void audio_receiver_reset_timing(void) {
 
 bool audio_receiver_is_playing(void) {
   return receiver.timing.playing;
+}
+
+void audio_receiver_rebuffer_start(void) {
+  receiver.timing.playout_started = false;
+  receiver.timing.ready_time_us = 0;
+  receiver.timing.pending_valid = false;
+  receiver.timing.pending_frame_len = 0;
+  receiver.timing.consecutive_early_frames = 0;
+  receiver.timing.consecutive_late_frames = 0;
+  receiver.blocks_read_in_sequence = 0;
 }
 
 void audio_receiver_set_stream_type(audio_stream_type_t type) {

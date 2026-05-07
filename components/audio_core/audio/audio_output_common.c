@@ -18,9 +18,13 @@
 #define CLIP_RISK_PEAK      30000
 #define EQ_RELOAD_PEAK_GUARD 22000
 #define EQ_RELOAD_MAX_DEFER  12
-#define GAP_CONCEAL_REPEAT_MAX 6
+#define GAP_CONCEAL_REPEAT_MAX 16
 #define GAP_CONCEAL_FADE_Q15   26214
 #define STACK_LOG_INTERVAL_US 15000000ULL
+#define REBUFFER_LOG_INTERVAL_US 1000000ULL
+#define REBUFFER_STARVATION_LOG_US 3000000ULL
+#define REBUFFER_COOLDOWN_US 1500000ULL
+#define REBUFFER_RESUME_STREAK_REQUIRED 3U
 
 static const audio_output_hw_ops_t *s_ops = NULL;
 static volatile bool flush_requested = false;
@@ -32,6 +36,9 @@ static volatile bool s_eq_reload_pending = false;
 static uint8_t s_eq_reload_defer_count = 0;
 static uint32_t s_gain_diag_counter = 0;
 static volatile audio_fidelity_mode_t s_fidelity_mode = AUDIO_FIDELITY_MODE_PURE;
+static StaticTask_t s_playback_tcb;
+static StackType_t *s_playback_stack = NULL;
+#define PLAYBACK_STACK_SIZE 3584
 
 static void log_stack_watermark(const char *reason) {
   UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
@@ -105,6 +112,28 @@ static void apply_concealment_fade(int16_t *buf, size_t sample_count,
   }
 }
 
+static uint32_t stats_delta_u32(uint32_t current, uint32_t base) {
+  return current >= base ? (current - base) : current;
+}
+
+static uint32_t rebuffer_resume_frames(uint32_t target_frames) {
+  uint32_t target = target_frames > 0 ? target_frames : 4U;
+  uint32_t plus_margin = target + 2U;
+  uint32_t scaled = (target * 11U + 4U) / 10U;
+  return plus_margin > scaled ? plus_margin : scaled;
+}
+
+static uint32_t rebuffer_low_water_frames(uint32_t target_frames) {
+  if (target_frames <= 4U) {
+    return target_frames > 0 ? target_frames : 1U;
+  }
+  if (target_frames <= 8U) {
+    return target_frames / 2U;
+  }
+  uint32_t third = target_frames / 3U;
+  return third > 4U ? third : 4U;
+}
+
 /* Maximum possible resampled frames: 48000/44100 ratio with headroom.
  * Computed as a plain constant so it can be used for static arrays. */
 #define PLAYBACK_RESAMPLE_BUF_FRAMES 400
@@ -161,7 +190,19 @@ static void playback_task(void *arg) {
   uint32_t nonzero_write_count = 0;
   audio_stats_t prev_stats = {0};
   audio_dsp_stats_t prev_dsp = {0};
+  audio_stats_t stable_stats_base = {0};
+  bool have_stable_stats_base = false;
+  audio_stats_t rebuffer_entry_stats = {0};
+  bool have_rebuffer_entry_stats = false;
   uint64_t last_stack_log_us = (uint64_t)esp_timer_get_time();
+  bool rebuffering = false;
+  bool rebuffer_starvation_logged = false;
+  uint32_t rebuffer_gap_events = 0;
+  uint64_t rebuffer_start_us = 0;
+  uint64_t rebuffer_last_log_us = 0;
+  uint64_t rebuffer_cooldown_until_us = 0;
+  uint32_t rebuffer_resume_streak = 0;
+  uint32_t zero_read_count = 0;
 
   while (playback_running) {
     uint64_t loop_start_us = (uint64_t)esp_timer_get_time();
@@ -174,6 +215,119 @@ static void playback_task(void *arg) {
       audio_resample_reset();
       if (s_ops && s_ops->flush_output) {
         s_ops->flush_output(s_ops->ctx);
+      }
+    }
+
+    uint32_t buffered_frames = audio_receiver_get_buffered_frames();
+    uint32_t target_frames = audio_receiver_get_target_buffer_frames();
+    bool anchor_valid = audio_receiver_anchor_valid();
+    bool playing = audio_receiver_is_playing();
+    audio_stream_type_t stream_type = audio_receiver_get_stream_type();
+
+    if (rebuffering) {
+      uint32_t resume_frames = rebuffer_resume_frames(target_frames);
+      if (stream_type != AUDIO_STREAM_REALTIME || !playing || !anchor_valid) {
+        rebuffering = false;
+        rebuffer_starvation_logged = false;
+        have_rebuffer_entry_stats = false;
+        rebuffer_resume_streak = 0;
+      } else {
+        audio_stats_t cur_stats = {0};
+        audio_receiver_get_stats(&cur_stats);
+        if (buffered_frames >= resume_frames) {
+          rebuffer_resume_streak++;
+        } else {
+          rebuffer_resume_streak = 0;
+        }
+        if ((loop_start_us - rebuffer_last_log_us) >= REBUFFER_LOG_INTERVAL_US) {
+          ESP_LOGI(TAG,
+                   "[playback] low-water rebuffer wait: buffered=%u target=%u resume=%u streak=%u/%u elapsed_ms=%llu nack+%lu drop+%lu underrun+%lu",
+                   buffered_frames, target_frames > 0 ? target_frames : 4U, resume_frames,
+                   rebuffer_resume_streak, REBUFFER_RESUME_STREAK_REQUIRED,
+                   (unsigned long long)((loop_start_us - rebuffer_start_us) / 1000ULL),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.nack_requests_sent,
+                                                         rebuffer_entry_stats.nack_requests_sent)
+                                       : cur_stats.nack_requests_sent),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.packets_dropped,
+                                                         rebuffer_entry_stats.packets_dropped)
+                                       : cur_stats.packets_dropped),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.buffer_underruns,
+                                                         rebuffer_entry_stats.buffer_underruns)
+                                       : cur_stats.buffer_underruns));
+          rebuffer_last_log_us = loop_start_us;
+        }
+        if (!rebuffer_starvation_logged &&
+            (loop_start_us - rebuffer_start_us) >= REBUFFER_STARVATION_LOG_US) {
+          ESP_LOGW(TAG,
+                   "[playback] network starvation suspected: buffered=%u target=%u nack+%lu drop+%lu underrun+%lu late+%lu",
+                   buffered_frames, resume_frames,
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.nack_requests_sent,
+                                                         rebuffer_entry_stats.nack_requests_sent)
+                                       : cur_stats.nack_requests_sent),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.packets_dropped,
+                                                         rebuffer_entry_stats.packets_dropped)
+                                       : cur_stats.packets_dropped),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.buffer_underruns,
+                                                         rebuffer_entry_stats.buffer_underruns)
+                                       : cur_stats.buffer_underruns),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.late_frames,
+                                                         rebuffer_entry_stats.late_frames)
+                                       : cur_stats.late_frames));
+          rebuffer_starvation_logged = true;
+        }
+        if (rebuffer_resume_streak >= REBUFFER_RESUME_STREAK_REQUIRED) {
+          ESP_LOGI(TAG,
+                   "[playback] low-water rebuffer done: elapsed_ms=%llu buffered=%u target=%u resume=%u streak=%u nack+%lu drop+%lu underrun+%lu",
+                   (unsigned long long)((loop_start_us - rebuffer_start_us) / 1000ULL),
+                   buffered_frames, target_frames > 0 ? target_frames : 4U, resume_frames,
+                   rebuffer_resume_streak,
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.nack_requests_sent,
+                                                         rebuffer_entry_stats.nack_requests_sent)
+                                       : cur_stats.nack_requests_sent),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.packets_dropped,
+                                                         rebuffer_entry_stats.packets_dropped)
+                                       : cur_stats.packets_dropped),
+                   (unsigned long)(have_rebuffer_entry_stats
+                                       ? stats_delta_u32(cur_stats.buffer_underruns,
+                                                         rebuffer_entry_stats.buffer_underruns)
+                                       : cur_stats.buffer_underruns));
+          rebuffering = false;
+          rebuffer_starvation_logged = false;
+          have_rebuffer_entry_stats = false;
+          zero_read_count = 0;
+          rebuffer_gap_events = 0;
+          concealment_repeats = 0;
+          rebuffer_resume_streak = 0;
+          rebuffer_cooldown_until_us = loop_start_us + REBUFFER_COOLDOWN_US;
+          stable_stats_base = cur_stats;
+          have_stable_stats_base = true;
+        }
+      }
+
+      if (rebuffering) {
+        if (s_ops && s_ops->write_pcm) {
+          s_ops->write_pcm(s_ops->ctx, silence,
+                           (size_t)AO_FRAME_SAMPLES * 2 * sizeof(int16_t),
+                           pdMS_TO_TICKS(50));
+        }
+        audio_pipeline_note_playback_busy(
+            (uint32_t)((uint64_t)esp_timer_get_time() - loop_start_us));
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        if ((now_us - last_stack_log_us) >= STACK_LOG_INTERVAL_US) {
+          log_stack_watermark("audio_play");
+          last_stack_log_us = now_us;
+        }
+        vTaskDelay(1);
+        continue;
       }
     }
 
@@ -264,6 +418,12 @@ static void playback_task(void *arg) {
         prev_stats = cur_stats;
         prev_dsp = cur_dsp;
       }
+      if (!have_stable_stats_base) {
+        audio_receiver_get_stats(&stable_stats_base);
+        have_stable_stats_base = true;
+      }
+      zero_read_count = 0;
+      rebuffer_gap_events = 0;
       if (s_ops && s_ops->write_pcm) {
         s_ops->write_pcm(s_ops->ctx, play_buf, play_samples * 2 * sizeof(int16_t),
                          portMAX_DELAY);
@@ -277,11 +437,40 @@ static void playback_task(void *arg) {
       }
       taskYIELD();
     } else {
-      static uint32_t zero_read_count = 0;
-      if (++zero_read_count % 100 == 0) {
-        uint32_t buffered_frames = audio_receiver_get_buffered_frames();
-        bool anchor_valid = audio_receiver_anchor_valid();
-        bool playing = audio_receiver_is_playing();
+      bool suppress_concealment = false;
+      zero_read_count++;
+      if (stream_type == AUDIO_STREAM_REALTIME && playing && anchor_valid) {
+        uint32_t low_water_frames = rebuffer_low_water_frames(target_frames);
+        bool cooldown_active = loop_start_us < rebuffer_cooldown_until_us;
+        if (!rebuffering && buffered_frames <= low_water_frames &&
+            zero_read_count >= 2) {
+          audio_stats_t cur_stats = {0};
+          audio_receiver_get_stats(&cur_stats);
+          rebuffer_entry_stats = have_stable_stats_base ? stable_stats_base : cur_stats;
+          have_rebuffer_entry_stats = true;
+          ESP_LOGW(TAG,
+                   "[playback] low-water rebuffer start: buffered=%u low=%u target=%u resume=%u zero_reads=%u gap=%u cooldown=%d nack+%lu drop+%lu underrun+%lu",
+                   buffered_frames, low_water_frames, target_frames > 0 ? target_frames : 4U,
+                   rebuffer_resume_frames(target_frames),
+                   zero_read_count, rebuffer_gap_events,
+                   cooldown_active ? 1 : 0,
+                   (unsigned long)stats_delta_u32(cur_stats.nack_requests_sent,
+                                                  rebuffer_entry_stats.nack_requests_sent),
+                   (unsigned long)stats_delta_u32(cur_stats.packets_dropped,
+                                                  rebuffer_entry_stats.packets_dropped),
+                   (unsigned long)stats_delta_u32(cur_stats.buffer_underruns,
+                                                  rebuffer_entry_stats.buffer_underruns));
+          audio_receiver_rebuffer_start();
+          rebuffering = true;
+          rebuffer_starvation_logged = false;
+          rebuffer_start_us = loop_start_us;
+          rebuffer_last_log_us = loop_start_us;
+          rebuffer_resume_streak = 0;
+          concealment_repeats = GAP_CONCEAL_REPEAT_MAX;
+          suppress_concealment = true;
+        }
+      }
+      if (zero_read_count % 100 == 0) {
         if (playing && (anchor_valid || buffered_frames > 0)) {
           ESP_LOGW(TAG,
                    "[playback] 100x zero reads detected, buffer=%u, anchor=%d, "
@@ -295,7 +484,8 @@ static void playback_task(void *arg) {
         }
       }
       if (s_ops && s_ops->write_pcm) {
-        if (last_good_buf && last_good_samples > 0 &&
+        if (!suppress_concealment &&
+            last_good_buf && last_good_samples > 0 &&
             concealment_repeats < GAP_CONCEAL_REPEAT_MAX) {
           apply_concealment_fade(last_good_buf, last_good_samples,
                                  concealment_repeats);
@@ -306,17 +496,19 @@ static void playback_task(void *arg) {
           }
           s_ops->write_pcm(s_ops->ctx, last_good_buf,
                            last_good_samples * sizeof(int16_t),
-                           pdMS_TO_TICKS(10));
+                           pdMS_TO_TICKS(50));
           audio_pipeline_note_gap_concealment(concealment_repeats == 0);
+          if (concealment_repeats == 0) {
+            rebuffer_gap_events++;
+          }
           concealment_repeats++;
         } else {
           if (concealment_repeats == 0) {
             ESP_LOGW(TAG, "[playback] silence fill: no last_good_buf, buffer=%u, anchor=%d",
-                     audio_receiver_get_buffered_frames(),
-                     audio_receiver_anchor_valid() ? 1 : 0);
+                     buffered_frames, anchor_valid ? 1 : 0);
           }
           s_ops->write_pcm(s_ops->ctx, silence,
-                           (size_t)AO_FRAME_SAMPLES * 2 * sizeof(int16_t), pdMS_TO_TICKS(10));
+                           (size_t)AO_FRAME_SAMPLES * 2 * sizeof(int16_t), pdMS_TO_TICKS(50));
         }
       }
       audio_pipeline_note_playback_busy(
@@ -353,8 +545,24 @@ void audio_output_common_start(void) {
   playback_running = true;
   const char *name = (s_ops && s_ops->task_name) ? s_ops->task_name
                                                   : "audio_play";
-  xTaskCreatePinnedToCore(playback_task, name, 3584, NULL, 7,
-                          &playback_task_handle, AO_PLAYBACK_CORE);
+  if (!s_playback_stack) {
+    s_playback_stack = heap_caps_malloc(PLAYBACK_STACK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_playback_stack) {
+      s_playback_stack = heap_caps_malloc(PLAYBACK_STACK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+  }
+  if (!s_playback_stack) {
+    ESP_LOGE(TAG, "Failed to allocate playback stack");
+    playback_running = false;
+    return;
+  }
+  playback_task_handle = xTaskCreateStaticPinnedToCore(
+      playback_task, name, PLAYBACK_STACK_SIZE / sizeof(StackType_t), NULL, 7,
+      s_playback_stack, &s_playback_tcb, AO_PLAYBACK_CORE);
+  if (playback_task_handle == NULL) {
+    ESP_LOGE(TAG, "Failed to create playback task");
+    playback_running = false;
+  }
 }
 
 void audio_output_common_stop(void) {

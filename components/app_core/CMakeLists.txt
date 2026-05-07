@@ -6,6 +6,8 @@ idf_component_register(
     REQUIRES
         airplay_core
         audio_core
+        auto_brightness
+        env_monitor
         network_core
         screen_ui
         realtime_voice

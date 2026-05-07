@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "voice_common.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,11 +23,12 @@ extern "C" {
 /* ---- Tunables (kept here so both the module and the orchestrator see them
  *      and they belong to the playout concern, not the WebSocket or VAD). ---- */
 
-#define VOICE_PLAYOUT_RING_MS         3000  /* total ring capacity in ms */
-#define VOICE_PLAYOUT_PREFILL_MS      150   /* startup watermark before draining */
-#define VOICE_PLAYOUT_LOW_MS          600   /* underrun warning threshold */
-#define VOICE_PLAYOUT_GAP_CONCEAL_MS  50    /* fade window for gap-concealment */
-#define VOICE_PLAYOUT_GAP_TIMEOUT_MS  500   /* close playback after this much silence */
+#define VOICE_PLAYOUT_RING_MS         10000 /* total ring capacity in ms */
+#define VOICE_PLAYOUT_PREFILL_MS          800  /* startup watermark before draining */
+#define VOICE_PLAYOUT_LOW_MS              500  /* underrun warning threshold */
+#define VOICE_PLAYOUT_REBUFFER_RESUME_MS  800  /* resume after underrun */
+#define VOICE_PLAYOUT_SILENCE_FILL_MS     20   /* inject silence once when starving */
+#define VOICE_PLAYOUT_GAP_TIMEOUT_MS      800  /* close playback after this much silence */
 
 /** Allocate the ring (idempotent). Sample rate is the Omni response audio
  *  rate, used to size the ring so it holds VOICE_PLAYOUT_RING_MS of audio. */
@@ -36,6 +39,11 @@ void voice_playout_deinit(void);
 
 /** Reset write/read pointers and last-write timestamp without freeing memory. */
 void voice_playout_reset(void);
+
+/** Stream format reported by the current assistant audio reply. Defaults to the
+ *  speaker-native contract until the first audio chunk arrives. */
+void voice_playout_set_stream_format(const voice_pcm_format_t *format);
+voice_pcm_format_t voice_playout_stream_format(void);
 
 /** Mono-frame counts available for pop / free for push. */
 size_t voice_playout_avail(void);

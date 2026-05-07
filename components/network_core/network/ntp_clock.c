@@ -42,6 +42,11 @@ typedef struct __attribute__((packed)) {
 
 #define NTP_STACK_SIZE 3072
 #define STACK_LOG_INTERVAL_US 15000000LL
+#if CONFIG_FREERTOS_UNICORE
+#define NTP_TASK_CORE 0
+#else
+#define NTP_TASK_CORE 0
+#endif
 
 static StaticTask_t s_ntp_tcb;
 static StackType_t *s_ntp_stack = NULL;
@@ -362,9 +367,9 @@ esp_err_t ntp_clock_start_client(uint32_t remote_ip, uint16_t remote_port) {
 
   if (!s_ntp_stack) {
     s_ntp_stack = heap_caps_malloc(NTP_STACK_SIZE,
-                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_ntp_stack) {
-      s_ntp_stack = malloc(NTP_STACK_SIZE);
+      s_ntp_stack = heap_caps_malloc(NTP_STACK_SIZE, MALLOC_CAP_8BIT);
     }
   }
   if (!s_ntp_stack) {
@@ -375,9 +380,9 @@ esp_err_t ntp_clock_start_client(uint32_t remote_ip, uint16_t remote_port) {
     return ESP_ERR_NO_MEM;
   }
 
-  ntp.task_handle = xTaskCreateStatic(ntp_task, "ntp_clock",
-                                      NTP_STACK_SIZE / sizeof(StackType_t),
-                                      NULL, 5, s_ntp_stack, &s_ntp_tcb);
+  ntp.task_handle = xTaskCreateStaticPinnedToCore(
+      ntp_task, "ntp_clock", NTP_STACK_SIZE / sizeof(StackType_t),
+      NULL, 5, s_ntp_stack, &s_ntp_tcb, NTP_TASK_CORE);
   if (ntp.task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create NTP task");
     close(ntp.socket);

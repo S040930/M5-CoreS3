@@ -16,10 +16,12 @@ idf_component_register(
         "audio/audio_stream_realtime.c"
         "audio/audio_timing.c"
         "audio/audio_volume.c"
+        "resource/resource_manager.c"
     INCLUDE_DIRS
         "."
         "audio"
         "resampler"
+        "resource"
     REQUIRES
         board_cores3
         esp_common

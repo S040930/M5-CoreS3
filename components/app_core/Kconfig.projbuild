@@ -34,12 +34,12 @@ menu "Airplay ESP Configuration"
         config AUDIO_TARGET_LATENCY_MS
             int "Target playout latency (ms)"
             range 80 1000
-            default 220
+            default 280
 
         config AUDIO_MAX_BUFFER_MS
             int "Maximum queued audio depth (ms)"
             range 80 2000
-            default 240
+            default 1200
 
         config OUTPUT_MONO
             bool "Mono output (downmix stereo to mono)"
@@ -164,6 +164,17 @@ menu "Airplay ESP Configuration"
             default "Hi Joy" if VOICE_WAKE_HIJOY
             default "Computer" if VOICE_WAKE_COMPUTER
             depends on VOICE_ACTIVATION_PHRASE_ENABLE
+
+        config VOICE_ACTIVATION_FOLLOWUP_WINDOW_MS
+            int "Wake follow-up window (ms)"
+            range 1000 300000
+            default 60000
+            depends on VOICE_ACTIVATION_PHRASE_ENABLE
+            help
+                After the local wake phrase opens a voice session, the device
+                keeps accepting follow-up turns without requiring the wake
+                phrase again until this window expires. Each valid user turn
+                and each completed assistant reply extends the window.
 
         config VOICE_DEBUG_EVENT_LOG
             bool "Verbose voice event logging"
@@ -422,6 +433,94 @@ menu "Airplay ESP Configuration"
                 bool "Erase sedentary NVS calibration on each boot"
                 default n
         endmenu
+    endmenu
+
+    menu "Environment monitor (ENV.3 seasonal reminder)"
+        config ENV_MONITOR_ENABLE
+            bool "Enable ENV.3 environmental reminder"
+            default y
+            depends on BOARD_M5STACK_CORES3
+            help
+                Local SHT30 + QMP6988 sampling with seasonal comfort thresholds.
+                Temperature / humidity reminders speak through the existing Omni
+                one-shot voice path only when AirPlay and realtime voice are idle.
+
+        config ENV_MONITOR_POLL_INTERVAL_SEC
+            int "Sampling interval (seconds)"
+            range 5 600
+            default 30
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_MONITOR_COOLDOWN_SEC
+            int "Reminder cooldown (seconds)"
+            range 30 7200
+            default 900
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_TEMP_HYSTERESIS_C
+            int "Temperature hysteresis (C)"
+            range 0 5
+            default 1
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_HUMIDITY_HYSTERESIS_PCT
+            int "Humidity hysteresis (percentage points)"
+            range 0 20
+            default 3
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_SUMMER_TEMP_MIN_C
+            int "Summer temperature min (C)"
+            range 0 40
+            default 23
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_SUMMER_TEMP_MAX_C
+            int "Summer temperature max (C)"
+            range 0 45
+            default 28
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_SUMMER_HUMIDITY_MIN_PCT
+            int "Summer humidity min (%)"
+            range 0 100
+            default 40
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_SUMMER_HUMIDITY_MAX_PCT
+            int "Summer humidity max (%)"
+            range 0 100
+            default 80
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_WINTER_TEMP_MIN_C
+            int "Winter temperature min (C)"
+            range 0 40
+            default 20
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_WINTER_TEMP_MAX_C
+            int "Winter temperature max (C)"
+            range 0 45
+            default 25
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_WINTER_HUMIDITY_MIN_PCT
+            int "Winter humidity min (%)"
+            range 0 100
+            default 30
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_WINTER_HUMIDITY_MAX_PCT
+            int "Winter humidity max (%)"
+            range 0 100
+            default 60
+            depends on ENV_MONITOR_ENABLE
+
+        config ENV_MONITOR_DEBUG_LOG
+            bool "Log each ENV sample"
+            default y
+            depends on ENV_MONITOR_ENABLE
     endmenu
 
     menu "Screen UI"

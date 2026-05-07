@@ -10,6 +10,8 @@
 
 #include "resampler.h"
 
+#include "esp_heap_caps.h"
+
 #ifdef ENABLE_EXTRAPOLATION
 #include "extrapolator.h"
 #endif
@@ -25,6 +27,56 @@ static double subsample_no_interpolate(Resample *cxt, artsample_t *source,
 static double subsample_interpolate(Resample *cxt, artsample_t *source,
                                     double offset);
 static unsigned long gcd(unsigned long a, unsigned long b);
+
+static void *resample_alloc(size_t size) {
+  void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (p != NULL) {
+    return p;
+  }
+  return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+static void *resample_calloc(size_t count, size_t size) {
+  size_t total = count * size;
+  void *p = resample_alloc(total);
+  if (p != NULL) {
+    memset(p, 0, total);
+  }
+  return p;
+}
+
+static void resample_free(void *p) {
+  if (p != NULL) {
+    heap_caps_free(p);
+  }
+}
+
+static void resample_cleanup_partial(Resample *cxt) {
+  if (cxt == NULL) {
+    return;
+  }
+  if (cxt->filters != NULL) {
+    for (int i = 0; i <= cxt->numFilters; ++i) {
+      resample_free(cxt->filters[i]);
+    }
+    resample_free(cxt->filters);
+    cxt->filters = NULL;
+  }
+  if (cxt->buffers != NULL) {
+    for (int i = 0; i < cxt->numChannels; ++i) {
+      resample_free(cxt->buffers[i]);
+    }
+    resample_free(cxt->buffers);
+    cxt->buffers = NULL;
+  }
+  resample_free(cxt->tempFilter);
+  cxt->tempFilter = NULL;
+  resample_free(cxt);
+}
+
+#define malloc resample_alloc
+#define calloc resample_calloc
+#define free resample_free
 
 // There are now two functions to initialize a resampler context. The legacy
 // version is for arbitrary resampling operations with no fixed ratio (i.e.,
@@ -152,7 +204,7 @@ static unsigned long gcd(unsigned long a, unsigned long b);
 
 Resample *resampleInit(int numChannels, int numTaps, int numFilters,
                        double lowpassRatio, int flags) {
-  Resample *cxt = calloc(1, sizeof(Resample));
+  Resample *cxt = resample_calloc(1, sizeof(Resample));
   int i;
 
   if (lowpassRatio > 0.0 && lowpassRatio < 1.0) {
@@ -182,13 +234,22 @@ Resample *resampleInit(int numChannels, int numTaps, int numFilters,
   // note that we actually have one more than the specified number of filters
 
   cxt->filters =
-      (artsample_t **)calloc(cxt->numFilters + 1, sizeof(artsample_t *));
-  cxt->tempFilter = malloc(numTaps * sizeof(double));
+      (artsample_t **)resample_calloc(cxt->numFilters + 1, sizeof(artsample_t *));
+  if (cxt->filters == NULL) {
+    goto fail;
+  }
+  cxt->tempFilter = resample_alloc(numTaps * sizeof(double));
+  if (cxt->tempFilter == NULL) {
+    goto fail;
+  }
 
   for (i = 0; i <= cxt->numFilters; ++i) {
     int j;
 
-    cxt->filters[i] = calloc(cxt->numTaps, sizeof(artsample_t));
+    cxt->filters[i] = (artsample_t *)resample_calloc(cxt->numTaps, sizeof(artsample_t));
+    if (cxt->filters[i] == NULL) {
+      goto fail;
+    }
 
     if (i < cxt->numFilters) {
       init_filter(cxt, cxt->filters[i], (double)i / cxt->numFilters);
@@ -211,12 +272,18 @@ Resample *resampleInit(int numChannels, int numTaps, int numFilters,
   cxt->filters[0][cxt->numTaps - 1] = (artsample_t)0.0;
   cxt->filters[cxt->numFilters][0] = (artsample_t)0.0;
 
-  free(cxt->tempFilter);
+  resample_free(cxt->tempFilter);
   cxt->tempFilter = NULL;
-  cxt->buffers = (artsample_t **)calloc(numChannels, sizeof(artsample_t *));
+  cxt->buffers = (artsample_t **)resample_calloc(numChannels, sizeof(artsample_t *));
+  if (cxt->buffers == NULL) {
+    goto fail;
+  }
 
   for (i = 0; i < numChannels; ++i) {
-    cxt->buffers[i] = calloc(cxt->numSamples, sizeof(artsample_t));
+    cxt->buffers[i] = (artsample_t *)resample_calloc(cxt->numSamples, sizeof(artsample_t));
+    if (cxt->buffers[i] == NULL) {
+      goto fail;
+    }
   }
 
   cxt->outputOffset = numTaps / 2.0;
@@ -247,6 +314,10 @@ Resample *resampleInit(int numChannels, int numTaps, int numFilters,
   }
 
   return cxt;
+
+fail:
+  resample_cleanup_partial(cxt);
+  return NULL;
 }
 
 // Initialize a resampler context with the specified characteristics. The
@@ -563,6 +634,10 @@ ResampleResult resampleProcess(Resample *cxt, const artsample_t *const *input,
     ResampleResult res = {0, 0};
     int ch;
 
+    if (worker_contexts == NULL) {
+      return res;
+    }
+
     for (ch = 0; ch < cxt->numChannels; ++ch) {
       Resample *wcxt = worker_contexts + ch;
 
@@ -701,6 +776,10 @@ ResampleResult resampleProcessInterleaved(Resample *cxt,
     Resample *worker_contexts = calloc(cxt->numChannels, sizeof(Resample));
     ResampleResult res = {0, 0};
     int ch;
+
+    if (worker_contexts == NULL) {
+      return res;
+    }
 
     for (ch = 0; ch < cxt->numChannels; ++ch) {
       Resample *wcxt = worker_contexts + ch;
@@ -882,6 +961,10 @@ ResampleResult resampleProcessAndFlush(Resample *cxt,
       (artsample_t **)calloc((size_t)cxt->numChannels, sizeof(artsample_t *));
   ResampleResult res = {0, 0}, fres;
   int c;
+
+  if (output_array == NULL) {
+    return res;
+  }
 
   for (c = 0; c < cxt->numChannels; ++c) {
     output_array[c] = output[c];

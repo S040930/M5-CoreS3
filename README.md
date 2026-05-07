@@ -67,7 +67,7 @@ cd airplay-esp32
 source /path/to/esp-idf/export.sh
 
 idf.py set-target esp32s3
-idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.m5cores3" build
+idf.py -DSDKCONFIG_DEFAULTS="config/generated/sdkconfig.defaults;sdkconfig.defaults.m5cores3" build
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
@@ -75,11 +75,11 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 
 ## 配置与凭证规则
 
-**PlatformIO（推荐）**：编辑 `config/config.toml`（从 [`config/config.toml.example`](config/config.toml.example) 复制）。`pio run` 前会运行 [`scripts/pio_prebuild.py`](scripts/pio_prebuild.py)，在项目根生成 **`sdkconfig.defaults`**（含 Wi‑Fi/语音等密钥，**勿提交**；已写入 `.gitignore`），并镜像到 `config/generated/sdkconfig.defaults` 便于对照。
+**PlatformIO（推荐）**：编辑 `config/config.toml`（从 [`config/config.toml.example`](config/config.toml.example) 复制）。`pio run` 前会运行 [`scripts/pio_prebuild.py`](scripts/pio_prebuild.py)，只生成 **`config/generated/sdkconfig.defaults`** 这一份默认值文件；根目录 `sdkconfig.defaults` 不再保留。
 
 **纯 ESP-IDF**：仍可显式传入多份默认值，例如：
 
-- [`sdkconfig.defaults`](sdkconfig.defaults)：跨板级的正式产品默认值（PIO 下由脚本生成）
+- [`config/generated/sdkconfig.defaults`](config/generated/sdkconfig.defaults)：跨板级的正式产品默认值（PIO 下由脚本生成）
 - [`sdkconfig.defaults.m5cores3`](sdkconfig.defaults.m5cores3)：M5Stack CoreS3 的板级默认值（若仍存在；否则以 `config.toml` 为准）
 
 Wi‑Fi 凭证视为**开发者预置**数据，不由设备上的 UI、SoftAP、USB/HTTP 管理面负责输入。

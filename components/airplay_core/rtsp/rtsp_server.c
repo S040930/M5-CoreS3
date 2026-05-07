@@ -33,6 +33,11 @@ static char s_device_name[65] = {0};
 #define CLIENT_STACK_SIZE 8192
 #define SERVER_STACK_SIZE 4096
 #define STACK_LOG_INTERVAL_US 15000000LL
+#if CONFIG_FREERTOS_UNICORE
+#define RTSP_TASK_CORE 0
+#else
+#define RTSP_TASK_CORE 0
+#endif
 
 static int server_socket = -1;
 static TaskHandle_t server_task_handle = NULL;
@@ -114,7 +119,8 @@ static bool process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
     }
 
     size_t header_len = (size_t)(header_end - buffer) + 4;
-    char *header_str = malloc(header_len + 1);
+    char *header_str = heap_caps_malloc(header_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!header_str) header_str = malloc(header_len + 1);
     if (!header_str) {
       *buf_len = 0;
       break;
@@ -186,7 +192,8 @@ static void client_task(void *pvParameters) {
 
   // Allocate buffer
   size_t buf_capacity = RTSP_BUFFER_INITIAL;
-  uint8_t *buffer = malloc(buf_capacity);
+  uint8_t *buffer = heap_caps_malloc(buf_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buffer) buffer = malloc(buf_capacity);
   if (!buffer) {
     ESP_LOGE(TAG, "Failed to allocate buffer");
     rtsp_conn_free(conn);
@@ -303,6 +310,7 @@ static void signal_old_client_stop(int old_slot) {
 static void server_task(void *pvParameters) {
   (void)pvParameters;
   int64_t last_stack_log_us = esp_timer_get_time();
+  int64_t last_accept_diag_us = esp_timer_get_time();
 
   struct sockaddr_in server_addr, client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
@@ -359,17 +367,23 @@ static void server_task(void *pvParameters) {
   server_running = true;
 
   while (server_running) {
+    if ((esp_timer_get_time() - last_accept_diag_us) >= 5000000LL) {
+      ESP_LOGI(TAG, "RTSP accept wait: no client yet (port=%d)", RTSP_PORT);
+      last_accept_diag_us = esp_timer_get_time();
+    }
     int new_socket = accept(server_socket, (struct sockaddr *)&client_addr,
                             &client_addr_len);
     if (new_socket < 0) {
       if (server_running) {
-        ESP_LOGE(TAG, "Failed to accept: errno=%d", errno);
+        ESP_LOGW(TAG, "RTSP accept failed: errno=%d", errno);
       }
       continue;
     }
+    last_accept_diag_us = esp_timer_get_time();
 
     uint32_t client_ip = client_addr.sin_addr.s_addr;
     log_ipv4_addr("New AirPlay client: ", client_ip);
+    ESP_LOGI(TAG, "RTSP accept ok: client_port=%u", (unsigned)ntohs(client_addr.sin_port));
 
     // Find slot for new client (alternate between 0 and 1)
     int new_slot = 1 - current_slot;
@@ -402,9 +416,10 @@ static void server_task(void *pvParameters) {
 
     if (!s_client_stack[new_slot]) {
       s_client_stack[new_slot] = heap_caps_malloc(CLIENT_STACK_SIZE,
-                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
       if (!s_client_stack[new_slot]) {
-        s_client_stack[new_slot] = malloc(CLIENT_STACK_SIZE);
+        s_client_stack[new_slot] = heap_caps_malloc(CLIENT_STACK_SIZE,
+                                                    MALLOC_CAP_8BIT);
       }
     }
     if (!s_client_stack[new_slot]) {
@@ -414,10 +429,10 @@ static void server_task(void *pvParameters) {
       continue;
     }
 
-    clients[new_slot].task = xTaskCreateStatic(
+    clients[new_slot].task = xTaskCreateStaticPinnedToCore(
         client_task, "rtsp_client", CLIENT_STACK_SIZE / sizeof(StackType_t),
         (void *)(intptr_t)new_slot, 5, s_client_stack[new_slot],
-        &s_client_tcb[new_slot]);
+        &s_client_tcb[new_slot], RTSP_TASK_CORE);
     if (clients[new_slot].task == NULL) {
       ESP_LOGE(TAG, "Failed to create client task");
       close(new_socket);
@@ -470,9 +485,10 @@ esp_err_t rtsp_server_start(const char *device_name) {
 
   if (!s_server_stack) {
     s_server_stack = heap_caps_malloc(SERVER_STACK_SIZE,
-                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_server_stack) {
-      s_server_stack = malloc(SERVER_STACK_SIZE);
+      s_server_stack = heap_caps_malloc(SERVER_STACK_SIZE,
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
   }
   if (!s_server_stack) {
@@ -482,9 +498,9 @@ esp_err_t rtsp_server_start(const char *device_name) {
 
   s_start_errno = 0;
   server_running = false;
-  server_task_handle = xTaskCreateStatic(
+  server_task_handle = xTaskCreateStaticPinnedToCore(
       server_task, "rtsp_server", SERVER_STACK_SIZE / sizeof(StackType_t), NULL,
-      5, s_server_stack, &s_server_tcb);
+      5, s_server_stack, &s_server_tcb, RTSP_TASK_CORE);
   if (server_task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create RTSP server task");
     return ESP_FAIL;

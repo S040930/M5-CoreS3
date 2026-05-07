@@ -160,6 +160,7 @@ static void send_resend_request(audio_receiver_state_t *state,
     ESP_LOGD(TAG, "NACK sendto failed: %d", errno);
   } else {
     state->last_resend_error_time_us = 0;
+    state->stats.nack_requests_sent += count;
     ESP_LOGD(TAG, "NACK sent: seq=%u count=%u", first_seq, count);
   }
 }
@@ -220,7 +221,6 @@ static bool realtime_receive_packet(audio_stream_t *stream, uint8_t *packet,
           gap += 65536;
         }
         if (gap > 0 && gap < MAX_RESEND_GAP) {
-          state->stats.packets_dropped += gap;
           send_resend_request(state, expected_seq, (uint16_t)gap);
         }
       }

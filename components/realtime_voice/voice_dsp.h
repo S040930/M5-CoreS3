@@ -1,5 +1,7 @@
 #pragma once
 
+#include "voice_common.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -10,12 +12,6 @@
 #define CONFIG_RESAMPLER_TAPS 64
 #endif
 #define VOICE_DSP_RS_TAPS ((CONFIG_RESAMPLER_TAPS) & ~3)
-
-void *voice_buf_alloc(size_t bytes);
-void voice_buf_free(void *p);
-
-uint32_t voice_hw_codec_rate_hz(void);
-int voice_hw_mclk_multiple(uint32_t rate);
 
 bool voice_dsp_resampler_create_fixed(Resample **out_rs, double src_hz, double dst_hz,
                                       double *out_ratio);

@@ -5,7 +5,7 @@
 
 ## Test Matrix
 - Device mode: `PURE` vs `ENHANCED`.
-- Latency target: `220 ms` (balanced baseline).
+- Latency target: `280 ms` (`max_buffer_ms=420`, stable baseline).
 - Content set:
   - Strong bass / dense mix
   - Fast transients / electronic percussion
@@ -45,6 +45,42 @@
   - `buffer_underruns` growth near zero on healthy Wi-Fi
   - `late_frames` and `packets_dropped` remain low and non-bursting
   - `dsp_limiter_events` only rises on genuine loud passages
+
+## AirPlay Low-Water Recovery
+
+Realtime AirPlay now has two distinct recovery stages:
+
+- Short jitter: keep using brief `gap_concealment` or silence fill when a few frames are missing.
+- Sustained starvation: if buffered frames fall below the low-water threshold while `zero reads`,
+  underruns, and NACK bursts are growing, playback enters `low-water rebuffer` and stops trying to
+  live off concealment alone.
+- Rebuffer resume is intentionally stricter than the normal startup target: playback now waits for a
+  higher resume watermark plus a short consecutive-ready streak before returning to real audio.
+- After rebuffer completes, a short cooldown hold prevents the output path from bouncing straight back
+  into `concealment -> immediate rebuffer -> concealment` oscillation.
+
+Expected recovery logs:
+
+- `low-water rebuffer start: buffered=... low=... target=... resume=... zero_reads=... cooldown=... nack+...`
+- `low-water rebuffer wait: buffered=... target=... resume=... streak=... elapsed_ms=... nack+...`
+- `low-water rebuffer done: elapsed_ms=... buffered=... target=... resume=... streak=...`
+- `network starvation suspected: ...` if refill still fails after the rebuffer window begins
+
+Interpretation:
+
+- `Anchor established` continuing alongside `low-water rebuffer` usually means timing is still valid and
+  the main issue is upstream packet supply, not anchor calculation.
+- Repeated `NACK sent` plus rebuffer cycles points to burst loss / weak Wi-Fi / sender delivery issues.
+- If rebuffer rarely triggers and `buffered_frames` stays near target, the local buffer policy is healthy.
+- Rebuffer `nack+/drop+/underrun+` counters are now measured against the previous stable-play baseline,
+  so non-zero deltas indicate how much loss pressure built up before the recovery cycle began.
+
+## Runtime Config Source
+
+- The real device behavior comes from [`config/config.toml`](/Users/mac/Desktop/airplay/config/config.toml).
+- [`config/config.toml.example`](/Users/mac/Desktop/airplay/config/config.toml.example) is only a sample template.
+- If the device still reports an old target frame count after changing the example file, regenerate from
+  the real `config.toml` and rebuild.
 
 ## Acceptance
 - `PURE` accepted when:

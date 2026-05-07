@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "env_monitor.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        audio_core
+        board_cores3
+        esp_driver_i2c
+        esp_timer
+        realtime_voice
+)

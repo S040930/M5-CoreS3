@@ -71,6 +71,25 @@ typedef void (*audio_output_ref_tap_fn)(const int16_t *interleaved_stereo,
 void audio_output_set_ref_tap(audio_output_ref_tap_fn fn, void *ctx);
 
 /**
+ * Open the shared speaker path for an external owner such as realtime voice.
+ * The caller must already hold speaker ownership via
+ * audio_output_acquire_external().
+ */
+esp_err_t audio_output_external_open(uint32_t rate);
+
+/**
+ * Write raw PCM data through the shared speaker path while an external owner
+ * holds it.
+ */
+esp_err_t audio_output_external_write(const void *data, size_t bytes, TickType_t wait);
+
+/**
+ * Close the shared speaker path for an external owner without changing
+ * ownership state.
+ */
+void audio_output_external_close(void);
+
+/**
  * Write raw PCM data to the I2S output.
  * Used by the retained AirPlay playback path when the output worker
  * is stopped or bypassed.

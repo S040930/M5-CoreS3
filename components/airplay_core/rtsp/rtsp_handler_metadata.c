@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "audio_output.h"
@@ -192,22 +191,9 @@ void rtsp_handle_set_parameter(int socket, rtsp_conn_t *conn,
                  "Artwork dropped: %s (%zu bytes) exceeds limit %u bytes",
                  req->content_type, body_len, (unsigned)RTSP_MAX_ARTWORK_BYTES);
       } else {
-        void *artwork_copy = heap_caps_malloc(body_len, MALLOC_CAP_SPIRAM);
-        if (artwork_copy == NULL) {
-          artwork_copy = malloc(body_len);
-        }
-        if (artwork_copy != NULL) {
-          memcpy(artwork_copy, body, body_len);
-          event_data.metadata.artwork_data = artwork_copy;
-          event_data.metadata.artwork_len = body_len;
-          event_data.metadata.has_artwork = true;
-          has_metadata = true;
-          ESP_LOGI("rtsp_handlers", "Received artwork: %s (%zu bytes)",
-                   req->content_type, body_len);
-        } else {
-          ESP_LOGE("rtsp_handlers", "Artwork allocation failed: %s (%zu bytes)",
-                   req->content_type, body_len);
-        }
+        ESP_LOGI("rtsp_handlers",
+                 "Artwork skipped: %s (%zu bytes)",
+                 req->content_type, body_len);
       }
     }
   } else if (strstr(req->content_type, "application/x-apple-binary-plist")) {

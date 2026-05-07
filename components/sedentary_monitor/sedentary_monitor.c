@@ -22,6 +22,11 @@
 #endif
 
 static bool s_user_enabled = true;
+#if CONFIG_FREERTOS_UNICORE
+#define SEDENTARY_TASK_CORE 0
+#else
+#define SEDENTARY_TASK_CORE 0
+#endif
 
 #if CONFIG_SEDENTARY_ENABLE
 
@@ -221,7 +226,8 @@ esp_err_t sedentary_monitor_start(void) {
   s_absent_streak_ms = 0;
   s_fail_count = 0;
   s_pending_reminder = false;
-  if (xTaskCreate(monitor_task, "sedentary", 8192, NULL, 3, &s_task) != pdPASS) {
+  if (xTaskCreatePinnedToCore(monitor_task, "sedentary", 8192, NULL, 3, &s_task,
+                              SEDENTARY_TASK_CORE) != pdPASS) {
     s_running = false;
     sedentary_camera_deinit();
     return ESP_FAIL;

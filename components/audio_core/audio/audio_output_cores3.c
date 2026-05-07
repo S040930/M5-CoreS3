@@ -6,6 +6,7 @@
 #include "iot_board.h"
 #include "esp_check.h"
 #include "esp_codec_dev.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/semphr.h"
@@ -272,8 +273,9 @@ static esp_err_t codec_write_checked(const void *data, size_t bytes) {
   return ESP_OK;
 }
 
-static esp_err_t open_output(uint32_t rate) {
-  if (owner_locked_by_external()) {
+static esp_err_t open_output_internal(uint32_t rate, bool allow_external_owner,
+                                      const char *owner_label) {
+  if (!allow_external_owner && owner_locked_by_external()) {
     return ESP_ERR_INVALID_STATE;
   }
   int mclk_multiple = cores3_mclk_multiple_for_rate(rate);
@@ -310,9 +312,11 @@ static esp_err_t open_output(uint32_t rate) {
   audio_output_notify_i2s_tx(true);
   ESP_LOGI(TAG,
            "CoreS3 speaker open: rate=%" PRIu32 " bits=%d channels=%d "
-           "mask=0x%x mclk=%dx",
+           "mask=0x%x mclk=%dx%s%s",
            rate, sample_cfg.bits_per_sample, sample_cfg.channel,
-           sample_cfg.channel_mask, mclk_multiple ? mclk_multiple : 256);
+           sample_cfg.channel_mask, mclk_multiple ? mclk_multiple : 256,
+           owner_label != NULL ? " owner=" : "",
+           owner_label != NULL ? owner_label : "");
   return ESP_OK;
 }
 
@@ -328,7 +332,7 @@ static void hw_flush(void *ctx) {
   (void)ctx;
   refresh_output_controls();
   if (!s_output_open) {
-    if (open_output(s_output_rate) != ESP_OK) {
+    if (open_output_internal(s_output_rate, false, NULL) != ESP_OK) {
       ESP_LOGW(TAG, "Failed to re-open CoreS3 speaker path on flush");
     }
   }
@@ -361,7 +365,7 @@ esp_err_t audio_output_init(void) {
   s_hw_mute_state_init = false;
   portEXIT_CRITICAL(&s_volume_lock);
 
-  ESP_RETURN_ON_ERROR(open_output(AO_OUTPUT_RATE), TAG, "speaker open failed");
+  ESP_RETURN_ON_ERROR(open_output_internal(AO_OUTPUT_RATE, false, NULL), TAG, "speaker open failed");
   audio_resample_init(44100, AO_OUTPUT_RATE, 2);
   audio_output_common_init(&s_hw_ops);
   return ESP_OK;
@@ -373,7 +377,7 @@ void audio_output_start(void) {
     return;
   }
   if (!s_output_open) {
-    if (open_output(s_output_rate) != ESP_OK) {
+    if (open_output_internal(s_output_rate, false, NULL) != ESP_OK) {
       ESP_LOGW(TAG, "Failed to open CoreS3 speaker path on start");
       return;
     }
@@ -412,9 +416,42 @@ void audio_output_set_sample_rate(uint32_t rate) {
     return;
   }
   ESP_LOGI(TAG, "Setting speaker sample rate to %" PRIu32 " Hz", rate);
-  if (open_output(rate) != ESP_OK) {
+  if (open_output_internal(rate, false, NULL) != ESP_OK) {
     ESP_LOGW(TAG, "Failed to re-open CoreS3 speaker path");
   }
+}
+
+esp_err_t audio_output_external_open(uint32_t rate) {
+  if (!owner_locked_by_external()) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (open_output_internal(rate, true, "external") != ESP_OK) {
+    return ESP_FAIL;
+  }
+  return ESP_OK;
+}
+
+esp_err_t audio_output_external_write(const void *data, size_t bytes, TickType_t wait) {
+  if (!owner_locked_by_external() || !s_output_open) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  (void)wait;
+  apply_volume_step(false);
+  return codec_write_checked(data, bytes);
+}
+
+void audio_output_external_close(void) {
+  if (!s_output_open || s_speaker_handle == NULL) {
+    return;
+  }
+  hw_volume_push_cache_invalidate();
+  int ret = esp_codec_dev_close(s_speaker_handle);
+  if (ret != ESP_CODEC_DEV_OK) {
+    ESP_LOGD(TAG, "Speaker close skipped (already closed: %d)", ret);
+  }
+  s_output_open = false;
+  audio_output_notify_i2s_tx(false);
+  ESP_LOGI(TAG, "CoreS3 speaker closed owner=external");
 }
 
 void audio_output_flush(void) { audio_output_common_flush(); }
@@ -533,7 +570,7 @@ esp_err_t audio_output_release_external(const char *owner_tag, bool resume_worke
 
   if (should_resume) {
     if (!s_output_open) {
-      open_output(s_output_rate);
+      (void)open_output_internal(s_output_rate, false, NULL);
     }
     audio_output_common_start();
   }
@@ -645,7 +682,7 @@ esp_err_t audio_output_play_test_tone(uint32_t frequency_hz, uint32_t duration_m
     audio_output_common_stop();
   }
 
-  esp_err_t err = open_output(TEST_TONE_RATE);
+  esp_err_t err = open_output_internal(TEST_TONE_RATE, false, NULL);
   if (err != ESP_OK) {
     if (restart_worker) {
       audio_output_common_start();
@@ -657,7 +694,9 @@ esp_err_t audio_output_play_test_tone(uint32_t frequency_hz, uint32_t duration_m
   if (chunk_frames == 0) {
     chunk_frames = TEST_TONE_RATE / 50U;
   }
-  int16_t *pcm = calloc(chunk_frames * CORES3_CHANNELS, sizeof(int16_t));
+  int16_t *pcm = heap_caps_malloc(chunk_frames * CORES3_CHANNELS * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!pcm) pcm = calloc(chunk_frames * CORES3_CHANNELS, sizeof(int16_t));
+  if (pcm) memset(pcm, 0, chunk_frames * CORES3_CHANNELS * sizeof(int16_t));
   if (pcm == NULL) {
     if (restart_worker) {
       audio_output_common_start();

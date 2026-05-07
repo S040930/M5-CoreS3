@@ -6,6 +6,7 @@
 #include "iot_board.h"
 #include "network/mdns_airplay.h"
 #include "receiver_state.h"
+#include "resource/resource_manager.h"
 #include "screen_ui.h"
 #include "rtsp/rtsp_events.h"
 #include "rtsp/rtsp_server.h"
@@ -72,6 +73,8 @@ static void sync_playback_worker(void) {
   if (s_playback_running && !audio_output_is_active()) {
     ESP_LOGW(TAG, "playback worker marked stopped: output no longer active");
     s_playback_running = false;
+    resource_manager_set_airplay_active(false);
+    resource_manager_release(RESOURCE_OWNER_AIRPLAY);
     log_owner_state("output_inactive");
   }
 
@@ -79,6 +82,8 @@ static void sync_playback_worker(void) {
     if (s_playback_running) {
       audio_pipeline_stop();
       s_playback_running = false;
+      resource_manager_set_airplay_active(false);
+      resource_manager_release(RESOURCE_OWNER_AIRPLAY);
       ESP_LOGI(TAG, "audio pipeline stopped (desired=0)");
     }
     log_playback_state("desired_off");
@@ -104,6 +109,8 @@ static void sync_playback_worker(void) {
   esp_err_t err = audio_pipeline_start(&s_pipeline_cfg);
   if (err == ESP_OK) {
     s_playback_running = true;
+    resource_manager_set_airplay_active(true);
+    resource_manager_acquire(RESOURCE_OWNER_AIRPLAY);
     ESP_LOGI(TAG, "audio pipeline started");
   } else {
     ESP_LOGW(TAG, "audio pipeline start failed: %s", esp_err_to_name(err));
@@ -291,6 +298,10 @@ void airplay_service_stop(void) {
 
   s_started = false;
   s_playback_desired = false;
+  if (s_playback_running) {
+    resource_manager_set_airplay_active(false);
+    resource_manager_release(RESOURCE_OWNER_AIRPLAY);
+  }
   s_playback_running = false;
   receiver_state_set_discoverable(false);
   receiver_state_set_session_establishing(false);
