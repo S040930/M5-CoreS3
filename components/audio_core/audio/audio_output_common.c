@@ -557,7 +557,7 @@ void audio_output_common_start(void) {
     return;
   }
   playback_task_handle = xTaskCreateStaticPinnedToCore(
-      playback_task, name, PLAYBACK_STACK_SIZE / sizeof(StackType_t), NULL, 7,
+      playback_task, name, PLAYBACK_STACK_SIZE / sizeof(StackType_t), NULL, 5,
       s_playback_stack, &s_playback_tcb, AO_PLAYBACK_CORE);
   if (playback_task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create playback task");
@@ -598,6 +598,29 @@ void audio_output_common_set_source_rate(int rate) {
 
 bool audio_output_common_is_active(void) {
   return playback_task_handle != NULL && playback_running;
+}
+
+static bool s_auto_fidelity = true;
+
+void audio_output_common_set_auto_fidelity(bool enable) {
+  s_auto_fidelity = enable;
+}
+
+void audio_output_common_apply_context_fidelity(bool airplay_active, bool voice_active) {
+  if (!s_auto_fidelity) return;
+
+  audio_fidelity_mode_t target = AUDIO_FIDELITY_MODE_PURE;
+  if (!airplay_active && !voice_active) {
+    target = AUDIO_FIDELITY_MODE_ENHANCED;
+  }
+
+  if (s_fidelity_mode != target) {
+    ESP_LOGI(TAG, "auto fidelity: %s -> %s (airplay=%d voice=%d)",
+             s_fidelity_mode == AUDIO_FIDELITY_MODE_ENHANCED ? "enhanced" : "pure",
+             target == AUDIO_FIDELITY_MODE_ENHANCED ? "enhanced" : "pure",
+             airplay_active ? 1 : 0, voice_active ? 1 : 0);
+    audio_output_common_set_fidelity_mode(target);
+  }
 }
 
 void audio_output_common_set_fidelity_mode(audio_fidelity_mode_t mode) {

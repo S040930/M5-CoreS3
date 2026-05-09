@@ -1,21 +1,23 @@
 #include "app_core.h"
 
+#include "app_events.h"
 #include "airplay_service.h"
 #include "auto_brightness.h"
 #include "bsp/display.h"
 #include "iot_board.h"
 #include "audio/audio_stream.h"
 #include "config_hash.h"
+#include "event_bus.h"
 #include "nvs_flash.h"
 #include "realtime_voice.h"
 #include "receiver_state.h"
 #include "env_monitor.h"
 #include "resource/resource_manager.h"
 #include "screen_ui.h"
-#include "sedentary_monitor.h"
 #include "settings.h"
 #include "wifi.h"
 #include "wifi_credentials.h"
+#include "perf_monitor.h"
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -165,6 +167,18 @@ static void load_voice_config(void) {
   if (settings_get_voice_model(cfg.model, sizeof(cfg.model)) != ESP_OK) {
     from_nvs = false;
     cfg.model[0] = '\0';
+  } else {
+    /* Detect and fix outdated model names with date suffixes */
+    char *p = cfg.model;
+    while ((p = strchr(p, '-')) != NULL) {
+      if (strncmp(p, "-20", 3) == 0 && strlen(p) >= 10) {
+        *p = '\0';
+        settings_set_voice_model(cfg.model);
+        ESP_LOGI(TAG, "Updated voice model name to: %s", cfg.model);
+        break;
+      }
+      p++;
+    }
   }
 
   /* Fall back to compile-time defaults for any missing NVS fields. */
@@ -177,6 +191,27 @@ static void load_voice_config(void) {
   if (cfg.api_key[0] == '\0' && strlen(CONFIG_VOICE_API_KEY) > 0) {
     snprintf(cfg.api_key, sizeof(cfg.api_key), "%s", CONFIG_VOICE_API_KEY);
   }
+
+  /* Force compile-time model name, overriding any stale NVS value */
+  if (strlen(CONFIG_VOICE_MODEL) > 0) {
+    snprintf(cfg.model, sizeof(cfg.model), "%s", CONFIG_VOICE_MODEL);
+    settings_set_voice_model(cfg.model);
+    ESP_LOGI(TAG, "Voice model forced to: %s", cfg.model);
+  }
+
+#ifndef CONFIG_VOICE_OMNI_VOICE
+#define CONFIG_VOICE_OMNI_VOICE "Tina"
+#endif
+  if (cfg.voice[0] == '\0') {
+    snprintf(cfg.voice, sizeof(cfg.voice), "%s", CONFIG_VOICE_OMNI_VOICE);
+  }
+
+  if (settings_get_voice_instructions(cfg.instructions, sizeof(cfg.instructions)) != ESP_OK) {
+    if (strlen(CONFIG_VOICE_INSTRUCTIONS) > 0) {
+      snprintf(cfg.instructions, sizeof(cfg.instructions), "%s", CONFIG_VOICE_INSTRUCTIONS);
+    }
+  }
+
   realtime_voice_set_config(&cfg);
 
   if (realtime_voice_config_ready()) {
@@ -230,9 +265,6 @@ static void start_voice_services(void) {
   if (env_monitor_start() != ESP_OK) {
     ESP_LOGW(TAG, "Env monitor start skipped or failed");
   }
-  if (sedentary_monitor_start() != ESP_OK) {
-    ESP_LOGW(TAG, "Sedentary monitor start skipped or failed");
-  }
 }
 
 static void stop_voice_services(void) {
@@ -240,7 +272,6 @@ static void stop_voice_services(void) {
     return;
   }
   env_monitor_stop();
-  sedentary_monitor_stop();
   realtime_voice_stop();
   s_voice_started = false;
 }
@@ -347,6 +378,10 @@ void app_core_run(void) {
   resource_manager_init();
   resource_manager_register_callback(app_core_on_resource_event, NULL);
   receiver_state_dispatch(RECEIVER_EVENT_BOOT);
+
+  event_bus_init();
+  app_events_init();
+
   /* Suppress noisy SPI master debug logs that are unrelated to voice input */
   esp_log_level_set("spi_master", ESP_LOG_WARN);
   esp_log_level_set("wifi", ESP_LOG_WARN);
@@ -363,6 +398,8 @@ void app_core_run(void) {
   esp_log_level_set("ES7210", ESP_LOG_INFO);
   esp_log_level_set("Adev_Codec", ESP_LOG_INFO);
   esp_log_level_set("realtime_voice", ESP_LOG_INFO);
+  esp_log_level_set("audio_dec", ESP_LOG_ERROR);
+  esp_log_level_set("audio_stream", ESP_LOG_ERROR);
 
   if (screen_ui_init() != ESP_OK) {
     ESP_LOGW(TAG, "screen UI init failed; continuing without local display");
@@ -384,6 +421,8 @@ void app_core_run(void) {
   realtime_voice_set_ui_state_cb(voice_ui_state_bridge);
   realtime_voice_set_ui_network_busy_cb(voice_ui_network_busy_bridge);
   realtime_voice_set_network_query_cb(network_query_for_voice);
+  realtime_voice_set_airplay_query_cb(airplay_service_is_active);
+  realtime_voice_set_airplay_refresh_cb(airplay_service_refresh_playback);
   push_screen_ui_state();
   log_runtime_resources("boot");
 
@@ -427,6 +466,7 @@ void app_core_run(void) {
     push_screen_ui_state();
     log_runtime_resources("idle_no_credentials");
   } else {
+    ESP_LOGI(TAG, "Initializing Wi-Fi");
     ret = wifi_init_sta();
     if (ret != ESP_OK) {
       ESP_LOGE(TAG, "Wi-Fi init failed: %s", esp_err_to_name(ret));
@@ -437,11 +477,15 @@ void app_core_run(void) {
 
     if (wifi_wait_connected(30000)) {
       receiver_state_set_network_ready(true);
+
       start_airplay_services();
-      /* AirPlay-only mode: keep voice stack disabled. */
+      start_voice_services();
+      reconcile_voice_mode();
       airplay_service_refresh_playback();
       push_screen_ui_state();
       log_runtime_resources("startup_connected");
+      perf_monitor_init();
+      perf_monitor_start();
     } else {
       receiver_state_set_recovering(true);
       push_screen_ui_state();
@@ -449,7 +493,7 @@ void app_core_run(void) {
     }
 
     if (!s_net_mon_stack) {
-      s_net_mon_stack = heap_caps_malloc(NET_MON_STACK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      s_net_mon_stack = heap_caps_malloc(NET_MON_STACK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
       if (!s_net_mon_stack) {
         s_net_mon_stack = heap_caps_malloc(NET_MON_STACK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
       }

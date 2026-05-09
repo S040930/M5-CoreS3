@@ -4,6 +4,14 @@
 M5Stack CoreS3 双模固件：AirPlay 1 接收播放 + 最小稳定语音助手 + 本地优先环境提醒。当前语音链路已收口为本地 ESP-SR AFE/WakeNet(`Hi ESP`)/VAD 单轮唤醒切段，随后通过 DashScope OpenAI-compatible Chat Completions 调用 `qwen3.5-omni-flash` 获取一次性回复；请求固定为非思考模式并同时要求 `text/audio` 输出，以便返回 `delta.audio.data`。每轮 assistant 播放结束后立即回到未 armed 的 wake-wait 状态，必须重新说唤醒词；旧的 follow-up window、多轮上下文续写、模型工具调用 followup 链已从主路径移除。ENV.3 传感器子系统本地读取 `SHT30 + QMP6988`，按季节和阈值先做本地判断，只有越界时才通过独立 one-shot `realtime_voice_speak_text()` 播报短提醒；气压仅记录诊断。语音回复继续复用共享 `audio_output` 外部所有权/写出路径，以保持与 AirPlay 一致的时钟、限幅和底噪行为，稳定性优先于复杂能力。
 
 ## Recent Changes
+- 2026-05-09: **Voice replies now carry live ENV context**: each Omni speech request now appends the current `env_monitor` snapshot into the instructions payload, so questions like “现在温度是多少度” can be answered from the live `SHT30 + QMP6988` readings instead of falling back to a generic reply.
+- 2026-05-09: **Grove ENV.3 SHT30 read-ready retry**: `env_monitor` now treats an immediate `SHT30` data-read NACK after the no-clock-stretch `0x2400` measurement command as a transient conversion-not-ready condition and retries the receive phase briefly before failing the sample. This matches field logs where Grove Port A address discovery succeeds for `SHT30 + QMP6988`, but the first SHT30 data read returns `unexpected nack`.
+- 2026-05-07: **Event-driven architecture refactoring (Phase 1-4 completed)**: 项目完成事件驱动架构重构，采用 ESP Event Loop 作为消息总线，按数据流划分模块。已完成：
+  - 阶段1: 代码清理（删除 sedentary_monitor、voice_tools、历史文档）
+  - 阶段2: 创建 `event_bus` 组件，定义事件 ID/类型/接口，定义 audio/voice/airplay/env 模块接口
+  - 阶段3: 组件事件化（env_monitor 发布 `EVENT_ENV_DATA_READY`/`EVENT_ENV_THRESHOLD_EXCEEDED`；创建 app_events 事件订阅）
+  - 阶段4: 接口实现（audio_interface/voice_interface/env_interface/airplay_interface）
+  - 重构为事件驱动架构奠定了基础
 - 2026-05-07: **voice_fe_v2 WDT starvation guard**: `voice_frontend_v2` now performs a cooperative `vTaskDelay(1)` on each successful loop iteration (after mic read + AFE feed/fetch), ensuring CPU0 idle task gets scheduled and task WDT remains fed under sustained frontend activity.
 - 2026-05-07: **AirPlay resume trigger after voice owner release**: `voice_controller` now calls the configured AirPlay refresh callback when voice playback stops and when AirPlay preempts an active voice reply. This ensures `airplay_service_refresh_playback()` retries pipeline startup immediately after `voice_v2` releases external speaker ownership, avoiding stuck playback when AirPlay was previously blocked by `external owner`.
 - 2026-05-07: **Voice speaker-format contract / single boundary adapter**: `voice_request` now parses first-packet audio metadata, including optional WAV headers, so the active turn records the cloud stream's actual sample rate / channels / bit depth once instead of inferring it in several modules. `voice_playout` keeps the current stream format as explicit state, `voice_speaker` sizes its write buffers from that live format, `voice_dsp` builds the playout resampler only from the stream rate, and `voice_reference` now treats the speaker output rate as the reference source rate. The result is a single format-adaptation boundary with first-packet format logs rather than repeated hidden assumptions.
@@ -51,7 +59,6 @@ M5Stack CoreS3 双模固件：AirPlay 1 接收播放 + 最小稳定语音助手 
   - `app_core` 在 `start_airplay_services()` 成功路径注册回调，仍保留 `reconcile_voice_mode()` 作兜底纠偏。
   - `realtime_voice_on_airplay_state_changed()`：边沿触发时打 `AirPlay active: voice yielding resources` / `AirPlay inactive: voice can resume listening`；仅在首次进入 AirPlay active 时 `send_response_cancel()`；`speaker_acquire` 在 `airplay_active` 时直接失败并限频 `voice speaker acquire skipped: airplay active`；standby 分支区分 `voice standby: airplay active`、AirPlay gate 下 10ms 轮询；WebSocket 路径忽略 `input_audio_buffer.speech_started` 与 `response.audio.delta`；`send_audio_frame` / `realtime_voice_notify_user_speech_start` 在 gate 下短路。
   - `sync_playback_worker()`：若外部 speaker owner 非空则跳过 `audio_pipeline_start` 并打 `speaker owner[pipeline_start_blocked]: external=1 owner=...`。
-  - `sedentary_alert_play()`：AirPlay session 或 voice 回复进行中时拒绝 acquire speaker。
   - 验证：`bash scripts/check-fast.sh`，`~/.platformio/penv/bin/pio run`。
 - 2026-05-03: **AirPlay 无声问题深度诊断与 voice/AirPlay 资源仲裁修正**:
   - Realtime voice 仲裁 bug 修正：`should_run_voice()` 现在明确检查 `airplay_active`，AirPlay 会话建立后立即返回 false，确保 voice task 在下一个循环中退出 active loop、关闭麦克风、断开 WebSocket。
@@ -62,7 +69,6 @@ M5Stack CoreS3 双模固件：AirPlay 1 接收播放 + 最小稳定语音助手 
   - RTSP ANNOUNCE 参数摘要：`rtsp_parse_sdp()` 完成后打印完整的 codec/sr/ch/bits/encrypt 参数及 frame_size/max_samples，便于快速验证配置。
   - 文档更新：`docs/voice-interaction.md` 补充 AirPlay preemption 详细说明，确保 voice 必须真正退出而非仅释放 speaker；`docs/audio-fidelity-qa.md` 新增"AirPlay Silent Playback Diagnosis"指南，明确诊断步骤与日志对应。
 - 2026-05-03: AirPlay runtime diagnostics and startup gating hardened for "discoverable but unusable" cases: startup now requires both mDNS publish and confirmed RTSP listen on 7000 before reporting ready; RTSP task startup failures are surfaced immediately; mDNS is rolled back when RTSP fails; AirPlay event/playback state logs now include receiver state + desired/running/output-active and external speaker owner tag diagnostics.
-- 2026-05-03: Optional **sedentary desk monitor** (`CONFIG_SEDENTARY_ENABLE`): GC0308 grayscale QQVGA → local baseline/ROI occupancy + NVS two-step calibration option → configurable timers; on-screen reminder default **`stand up`**; no cloud vision; reminder defers under AirPlay or active realtime voice response. See `docs/sedentary-monitor.md`.
 - 2026-05-03: Optional DashScope Realtime **function calling** (`CONFIG_VOICE_TOOLS_ENABLE` / `voice.tools.enabled`): `session.update` registers `set_timer`, `cancel_timer`, `get_device_status`; handles `response.function_call_arguments.done`, replies with `conversation.item.create` + follow-up `response.create`; relative `esp_timer` timers with UI/log on fire. See `docs/voice-interaction.md`.
 - 2026-05-03: Realtime voice playback now keeps a single assistant-turn speaker lifecycle, ignores late audio deltas after `response.audio.done`, and temporarily boosts speaker gain during voice playback before restoring the prior AirPlay volume.
 - 2026-05-03: Voice activation now runs in continuous listen mode only, so the device waits for the wake phrase without requiring a tap; tap-window has been removed.
@@ -134,6 +140,3 @@ M5Stack CoreS3 双模固件：AirPlay 1 接收播放 + 最小稳定语音助手 
 - 语音稳定性实施计划
   - Scope: Omni 原生音频会话收口、扬声器断续治理、配置与文档收尾、设备验证步骤。
   - File: `docs/plans/2026-05-05-voice-stability-plan.md`
-- 久坐监测（GC0308 + 视觉 HTTP）
-  - Scope: 抓拍周期、云端识别、可配置计时状态机、与 AirPlay / Realtime Voice 的扬声器仲裁；配置键与 TOML 映射。
-  - File: `docs/sedentary-monitor.md`

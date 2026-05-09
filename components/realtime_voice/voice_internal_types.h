@@ -12,6 +12,9 @@ extern "C" {
 
 #define VOICE_LOG_TAG "voice_v2"
 
+#define VOICE_HW_CHANNELS    2
+#define VOICE_HW_CHANNEL_MASK 0x03
+
 #define VOICE_MAX_TEXT_LEN 64
 #define VOICE_MAX_URL_LEN 256
 #define VOICE_MAX_API_KEY_LEN 256
@@ -64,6 +67,8 @@ typedef struct {
     char url[VOICE_MAX_URL_LEN];
     char api_key[VOICE_MAX_API_KEY_LEN];
     char model[VOICE_MAX_MODEL_LEN];
+    char voice[32];
+    char instructions[512];
 } voice_api_config_t;
 
 typedef struct {

@@ -101,10 +101,24 @@ menu "Airplay ESP Configuration"
 
         config VOICE_TTS_VOICE
             string "Assistant TTS voice name (DashScope)"
-            default "Ethan"
+            default "tina"
             help
-                DashScope realtime session \"voice\" field, e.g. Ethan, Cherry.
-                Leave empty to omit the field.
+                DashScope TTS voice name, e.g. tina, alexia, longanyang.
+                Used for offline TTS synthesis.
+
+        config VOICE_OMNI_VOICE
+            string "Qwen-Omni output voice name"
+            default "Tina"
+            help
+                Qwen-Omni model output voice name.
+                Examples: Tina, Ethan, Chelsie, Cherry.
+
+        config VOICE_ASR_MODEL
+            string "ASR model name"
+            default "qwen3-asr-flash"
+            help
+                DashScope ASR model for speech recognition.
+                Example: qwen3-asr-flash, paraformer-realtime-v2
 
         config VOICE_ENABLE_INPUT_TRANSCRIPTION
             bool "Enable optional realtime transcript events"
@@ -143,6 +157,8 @@ menu "Airplay ESP Configuration"
 
             config VOICE_WAKE_HIESP
                 bool "Hi ESP (wn9_hiesp)"
+            config VOICE_WAKE_HIESP_9S
+                bool "Hi ESP Light (wn9s_hiesp)"
             config VOICE_WAKE_NIHAOXIAOZHI
                 bool "你好小智 (wn9_nihaoxiaozhi_tts)"
             config VOICE_WAKE_ALEXA
@@ -157,7 +173,7 @@ menu "Airplay ESP Configuration"
 
         config VOICE_ACTIVATION_PHRASE
             string "Activation phrase label"
-            default "Hi ESP" if VOICE_WAKE_HIESP
+            default "Hi ESP" if VOICE_WAKE_HIESP || VOICE_WAKE_HIESP_9S
             default "你好小智" if VOICE_WAKE_NIHAOXIAOZHI
             default "Alexa" if VOICE_WAKE_ALEXA
             default "Jarvis" if VOICE_WAKE_JARVIS
@@ -312,17 +328,13 @@ menu "Airplay ESP Configuration"
             range 64 1024
             default 256
 
-        choice VOICE_PROMPT_PRESET
-            prompt "Voice prompt preset"
-            default VOICE_PROMPT_PRESET_BALANCED
-
-            config VOICE_PROMPT_PRESET_BALANCED
-                bool "Balanced default"
-            config VOICE_PROMPT_PRESET_CONVERSATIONAL
-                bool "More conversational"
-            config VOICE_PROMPT_PRESET_FACTUAL
-                bool "More factual"
-        endchoice
+        config VOICE_INSTRUCTIONS
+            string "System prompt (instructions) for Qwen-Omni"
+            default "你是运行在M5Stack CoreS3设备上的语音助手，可以回答用户的任何问题。用中文回答，回答尽量简短自然，适合语音播报。"
+            help
+                System message sent to the Qwen-Omni model as the "instructions" field.
+                This sets the assistant's personality and behavior guidelines.
+                Leave empty to omit the system message entirely.
 
         config VOICE_DEBUG_TLS_HEAP
             bool "Log internal/DMA heap around WebSocket TLS connect"
@@ -330,109 +342,6 @@ menu "Airplay ESP Configuration"
             help
                 When enabled, logs largest free internal and DMA-capable blocks
                 before connect and when transport connects (debug spike hunting).
-    endmenu
-
-    menu "Sedentary monitor (GC0308 local occupancy)"
-        config SEDENTARY_ENABLE
-            bool "Enable sedentary desk monitor"
-            default n
-            help
-                Periodic GC0308 grayscale capture and local coarse occupancy vs an
-                empty-desk baseline (NVS calibration). No cloud vision. Stops when
-                disabled at build time; sedentary_monitor_set_enabled can pause at runtime.
-
-        config SEDENTARY_CAPTURE_INTERVAL_SEC
-            int "Capture interval (seconds)"
-            range 5 600
-            default 30
-            depends on SEDENTARY_ENABLE
-
-        config SEDENTARY_REMIND_AFTER_SEC
-            int "Remind after seated (seconds)"
-            range 60 86400
-            default 3600
-            depends on SEDENTARY_ENABLE
-
-        config SEDENTARY_ABSENCE_RESET_SEC
-            int "Absence streak to reset session (seconds)"
-            range 30 7200
-            default 600
-            depends on SEDENTARY_ENABLE
-
-        config SEDENTARY_REPEAT_INTERVAL_SEC
-            int "Repeat reminder while overdue (seconds)"
-            range 60 7200
-            default 900
-            depends on SEDENTARY_ENABLE
-
-        config SEDENTARY_FAIL_SUSPEND_COUNT
-            int "Consecutive failures before suspend"
-            range 1 50
-            default 5
-            depends on SEDENTARY_ENABLE
-
-        config SEDENTARY_SUSPEND_COOLDOWN_SEC
-            int "Cooldown before leaving SUSPENDED (seconds)"
-            range 30 3600
-            default 300
-            depends on SEDENTARY_ENABLE
-
-        config SEDENTARY_CAM_XCLK_GPIO
-            int "Camera XCLK GPIO (-1 if unused)"
-            range -1 48
-            default 15
-            depends on SEDENTARY_ENABLE
-            help
-                M5 docs list -1 for BSP-managed clock; plain IDF often needs a GPIO
-                (try 15). Adjust if your CoreS3 revision differs.
-
-        config SEDENTARY_VOICE_PROMPT
-            string "On-screen reminder line (default stand up)"
-            default "stand up"
-            depends on SEDENTARY_ENABLE
-            help
-                Fixed product copy for the sedentary alert overlay. Empty falls back to
-                stand up. Not generated by any LLM.
-
-        menu "Local coarse detection"
-            depends on SEDENTARY_ENABLE
-
-            config SEDENTARY_LOCAL_PRESENT_THRESHOLD
-                int "Mean abs ROI diff: start present streak when >= this"
-                range 2 100
-                default 12
-
-            config SEDENTARY_LOCAL_ABSENT_THRESHOLD
-                int "Mean abs ROI diff: start absent streak when <= this"
-                range 1 99
-                default 5
-
-            config SEDENTARY_LOCAL_PRESENT_CONFIRM_COUNT
-                int "Consecutive present-like frames to confirm PRESENT"
-                range 1 20
-                default 3
-
-            config SEDENTARY_LOCAL_ABSENT_CONFIRM_COUNT
-                int "Consecutive absent-like frames to confirm ABSENT"
-                range 1 20
-                default 3
-
-            config SEDENTARY_LOCAL_ROI_MARGIN_PX
-                int "Expand calibrated ROI by this many pixels"
-                range 0 48
-                default 8
-
-            config SEDENTARY_LOCAL_ENABLE_CALIBRATION
-                bool "Require NVS two-step calibration (empty desk then seated)"
-                default y
-                help
-                    When enabled, run sedentary_calibration_begin_empty then
-                    sedentary_calibration_begin_present once before normal detection.
-
-            config SEDENTARY_LOCAL_RECAL_ON_BOOT
-                bool "Erase sedentary NVS calibration on each boot"
-                default n
-        endmenu
     endmenu
 
     menu "Environment monitor (ENV.3 seasonal reminder)"
@@ -526,8 +435,8 @@ menu "Airplay ESP Configuration"
     menu "Screen UI"
         config SCREEN_UI_ANIM_INTERVAL_MS
             int "LVGL animation timer period (ms)"
-            range 8 100
-            default 33
+            range 8 500
+            default 100
             help
                 Lower values increase UI smoothness but raise CPU load on CoreS3.
 

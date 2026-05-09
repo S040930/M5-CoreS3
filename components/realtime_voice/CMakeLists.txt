@@ -3,26 +3,24 @@ idf_component_register(
         "realtime_voice.c"
         "voice_controller.c"
         "voice_frontend_v2.c"
-        "voice_api_client.c"
+        "omni_client.c"
         "voice_player.c"
         "audio_ringbuf.c"
-        "afe_bridge.c"
         "voice_common.c"
         "voice_dsp.c"
         "voice_playout.c"
-        "voice_playout_drain.c"
         "voice_speaker.c"
-        "../audio_core/resampler/resampler.c"
+        "voice_interface.c"
+        "voice_events.c"
     INCLUDE_DIRS
         "."
-        "../audio_core/resampler"
     REQUIRES
         audio_core
         auto_brightness
         env_monitor
+        event_bus
         m5stack_core_s3
         esp_http_client
-        esp-sr
         json
         mbedtls
         esp_timer

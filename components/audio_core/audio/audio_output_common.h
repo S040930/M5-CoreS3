@@ -43,3 +43,5 @@ void audio_output_common_set_source_rate(int rate);
 bool audio_output_common_is_active(void);
 void audio_output_common_set_fidelity_mode(audio_fidelity_mode_t mode);
 audio_fidelity_mode_t audio_output_common_get_fidelity_mode(void);
+void audio_output_common_set_auto_fidelity(bool enable);
+void audio_output_common_apply_context_fidelity(bool airplay_active, bool voice_active);

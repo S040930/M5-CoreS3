@@ -34,7 +34,6 @@ esp_err_t resource_manager_release(resource_owner_t owner);
 void resource_manager_register_callback(resource_event_cb_t cb, void *ctx);
 
 bool resource_manager_is_airplay_active(void);
-void resource_manager_set_airplay_active(bool active);
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
         "audio_pipeline.c"
+        "audio_interface.c"
+        "resampler/resampler.c"
         "audio/alac_magic_cookie.c"
         "audio/audio_buffer.c"
         "audio/audio_crypto.c"
@@ -26,6 +28,7 @@ idf_component_register(
         board_cores3
         esp_common
         esp_timer
+        event_bus
         nvs_flash
         esp_audio_codec
         esp_codec_dev

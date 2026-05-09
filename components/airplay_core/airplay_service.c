@@ -1,8 +1,12 @@
 #include "airplay_service.h"
 
+#include "airplay_events.h"
 #include "audio/audio_output.h"
+#include "audio/audio_output_common.h"
 #include "audio_pipeline.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "event_bus.h"
 #include "iot_board.h"
 #include "network/mdns_airplay.h"
 #include "receiver_state.h"
@@ -73,7 +77,6 @@ static void sync_playback_worker(void) {
   if (s_playback_running && !audio_output_is_active()) {
     ESP_LOGW(TAG, "playback worker marked stopped: output no longer active");
     s_playback_running = false;
-    resource_manager_set_airplay_active(false);
     resource_manager_release(RESOURCE_OWNER_AIRPLAY);
     log_owner_state("output_inactive");
   }
@@ -82,7 +85,6 @@ static void sync_playback_worker(void) {
     if (s_playback_running) {
       audio_pipeline_stop();
       s_playback_running = false;
-      resource_manager_set_airplay_active(false);
       resource_manager_release(RESOURCE_OWNER_AIRPLAY);
       ESP_LOGI(TAG, "audio pipeline stopped (desired=0)");
     }
@@ -109,7 +111,6 @@ static void sync_playback_worker(void) {
   esp_err_t err = audio_pipeline_start(&s_pipeline_cfg);
   if (err == ESP_OK) {
     s_playback_running = true;
-    resource_manager_set_airplay_active(true);
     resource_manager_acquire(RESOURCE_OWNER_AIRPLAY);
     ESP_LOGI(TAG, "audio pipeline started");
   } else {
@@ -155,6 +156,7 @@ static void on_airplay_event(rtsp_event_t event, const rtsp_event_data_t *data,
     notify_airplay_active(true);
     sync_playback_worker();
     log_playback_state("client_connected");
+    airplay_publish_client_connected(NULL, NULL);
     break;
   case RTSP_EVENT_PLAYING:
     ESP_LOGI(TAG, "RTSP event: playing");
@@ -164,6 +166,9 @@ static void on_airplay_event(rtsp_event_t event, const rtsp_event_data_t *data,
     notify_airplay_active(true);
     sync_playback_worker();
     log_playback_state("playing");
+    airplay_publish_playback_start();
+    airplay_publish_stream_start();
+    audio_output_common_apply_context_fidelity(true, false);
     break;
   case RTSP_EVENT_PAUSED:
     ESP_LOGI(TAG, "RTSP event: paused");
@@ -174,6 +179,8 @@ static void on_airplay_event(rtsp_event_t event, const rtsp_event_data_t *data,
     notify_airplay_active(true);
     sync_playback_worker();
     log_playback_state("paused");
+    airplay_publish_playback_pause();
+    audio_output_common_apply_context_fidelity(false, false);
     break;
   case RTSP_EVENT_DISCONNECTED:
     ESP_LOGI(TAG, "RTSP event: disconnected");
@@ -184,6 +191,10 @@ static void on_airplay_event(rtsp_event_t event, const rtsp_event_data_t *data,
     notify_airplay_active(false);
     sync_playback_worker();
     log_playback_state("disconnected");
+    airplay_publish_client_disconnected();
+    airplay_publish_stream_stop();
+    airplay_publish_playback_stop();
+    audio_output_common_apply_context_fidelity(false, false);
     break;
   case RTSP_EVENT_METADATA:
     if (data != NULL) {
@@ -299,7 +310,6 @@ void airplay_service_stop(void) {
   s_started = false;
   s_playback_desired = false;
   if (s_playback_running) {
-    resource_manager_set_airplay_active(false);
     resource_manager_release(RESOURCE_OWNER_AIRPLAY);
   }
   s_playback_running = false;

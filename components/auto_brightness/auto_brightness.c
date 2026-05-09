@@ -10,9 +10,9 @@
 
 #define POLL_INTERVAL_MS       2000
 #define OVERRIDE_PAUSE_MS      30000
-#define BRIGHTNESS_HYSTERESIS  5
-#define SMOOTH_FACTOR_NUM      3
-#define SMOOTH_FACTOR_DEN      4
+#define BRIGHTNESS_HYSTERESIS  2
+#define SMOOTH_FACTOR_NUM      1
+#define SMOOTH_FACTOR_DEN      2
 
 typedef struct {
     uint16_t als_max;
@@ -21,11 +21,11 @@ typedef struct {
 } lux_segment_t;
 
 static const lux_segment_t s_segments[] = {
-    {10,   10, 30},
-    {50,   30, 50},
-    {200,  50, 70},
-    {600,  70, 85},
-    {1500, 85, 95},
+    {5,    5, 20},
+    {30,   20, 40},
+    {100,  40, 60},
+    {300,  60, 80},
+    {800,  80, 95},
     {0xFFFF, 95, 100},
 };
 #define SEGMENT_COUNT (sizeof(s_segments) / sizeof(s_segments[0]))

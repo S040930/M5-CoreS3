@@ -10,12 +10,6 @@ if command -v rg >/dev/null 2>&1; then
     echo "Refusing quick check: stale pre-refactor paths are still referenced"
     exit 1
   fi
-
-  if rg -n 'ui_core|ui_display' \
-      platformio.ini main/idf_component.yml components/app_core/CMakeLists.txt >/dev/null 2>&1; then
-    echo "Refusing quick check: stale pre-refactor paths are still referenced"
-    exit 1
-  fi
 fi
 
 echo "Running quick baseline build for m5cores3..."

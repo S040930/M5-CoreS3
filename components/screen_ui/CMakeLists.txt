@@ -2,14 +2,11 @@ idf_component_register(
     SRCS
         "screen_ui.c"
         "ui_renderer.c"
-        "ui_particles.c"
-        "ui_spectrum.c"
-        "ui_lyric.c"
-        "ui_decor.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         board_cores3
+        env_monitor
         esp_timer
         lvgl
 )

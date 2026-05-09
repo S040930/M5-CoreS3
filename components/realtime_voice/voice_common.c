@@ -5,14 +5,16 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
-#include "voice_speaker.h"
+#include "voice_internal_types.h"
 
 void *voice_buf_alloc(size_t bytes) {
-  void *p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (p == NULL) {
-    p = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+  // Buffers larger than 4KB prefer PSRAM to save internal RAM
+  if (bytes > 4096) {
+    void *p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p != NULL) return p;
   }
-  return p;
+  // Small buffers or PSRAM fallback: use internal RAM
+  return heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
 }
 
 void *voice_dma_buf_alloc(size_t bytes) {

@@ -2,6 +2,8 @@ idf_component_register(
     SRCS
         "airplay_service.c"
         "receiver_state.c"
+        "airplay_interface.c"
+        "airplay_events.c"
         "rtsp/rtsp_conn.c"
         "rtsp/rtsp_events.c"
         "rtsp/rtsp_handler_announce.c"
@@ -32,6 +34,7 @@ idf_component_register(
         esp_timer
         esp_netif
         esp_wifi
+        event_bus
 )
 
 # ── Removed: target_include_directories for app_core (layering: Layer 3 → Layer 4 violation)

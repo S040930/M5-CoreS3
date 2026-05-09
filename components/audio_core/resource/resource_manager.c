@@ -7,7 +7,6 @@
 static const char *TAG = "resource_mgr";
 
 static resource_owner_t s_owner = RESOURCE_OWNER_NONE;
-static bool s_airplay_active = false;
 static resource_event_cb_t s_cb = NULL;
 static void *s_cb_ctx = NULL;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -15,14 +14,16 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 esp_err_t resource_manager_init(void) {
   portENTER_CRITICAL(&s_mux);
   s_owner = RESOURCE_OWNER_NONE;
-  s_airplay_active = false;
   portEXIT_CRITICAL(&s_mux);
   ESP_LOGI(TAG, "initialized");
   return ESP_OK;
 }
 
 resource_owner_t resource_manager_get_owner(void) {
-  return s_owner;
+  portENTER_CRITICAL(&s_mux);
+  resource_owner_t owner = s_owner;
+  portEXIT_CRITICAL(&s_mux);
+  return owner;
 }
 
 esp_err_t resource_manager_acquire(resource_owner_t owner) {
@@ -74,9 +75,8 @@ void resource_manager_register_callback(resource_event_cb_t cb, void *ctx) {
 }
 
 bool resource_manager_is_airplay_active(void) {
-  return s_airplay_active;
-}
-
-void resource_manager_set_airplay_active(bool active) {
-  s_airplay_active = active;
+  portENTER_CRITICAL(&s_mux);
+  bool active = (s_owner == RESOURCE_OWNER_AIRPLAY);
+  portEXIT_CRITICAL(&s_mux);
+  return active;
 }

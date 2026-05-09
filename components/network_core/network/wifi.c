@@ -249,7 +249,7 @@ esp_err_t wifi_init_sta(void) {
   sta_config.sta.pmf_cfg.capable = true;
   sta_config.sta.pmf_cfg.required = false;
   sta_config.sta.listen_interval = 1;
-  sta_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  sta_config.sta.scan_method = WIFI_FAST_SCAN;
   sta_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
   xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);

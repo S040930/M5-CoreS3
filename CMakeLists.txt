@@ -5,13 +5,6 @@ cmake_minimum_required(VERSION 3.16)
 file(READ "${CMAKE_SOURCE_DIR}/version.txt" PROJECT_VER)
 string(STRIP "${PROJECT_VER}" PROJECT_VER)
 
-set(EXCLUDE_COMPONENTS
-    airplay_state
-    settings_core
-    ui_core
-    ui_display
-)
-
 set(_IDF_PATH "")
 if(DEFINED IDF_PATH AND NOT "${IDF_PATH}" STREQUAL "")
 	set(_IDF_PATH "${IDF_PATH}")

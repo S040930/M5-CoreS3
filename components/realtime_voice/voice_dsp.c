@@ -3,6 +3,7 @@
 #include "voice_playout.h"
 
 #include "audio/audio_output_common.h"
+#include "audio/audio_resample.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"

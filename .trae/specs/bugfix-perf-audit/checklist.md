@@ -1,8 +1,0 @@
-- [x] voice_playout_push/pop 使用 portMUX_TYPE 自旋锁保护，跨上下文并发安全
-- [x] voice_playout_push/pop 使用两段 memcpy 替代逐样本循环
-- [x] voice_playout_reset 在锁内重置读写指针
-- [x] stream_ctx_t.line_buf 改为指针 + 动态分配（voice_buf_alloc/voice_buf_free）
-- [x] http_event_handler 使用 line_buf_cap 替代 sizeof(line_buf)
-- [x] downsample_16k_to_8k 使用 3 点加权平均 FIR 低通，边界正确处理
-- [x] playout_workbufs_ensure 分配失败时保留旧缓冲区指针，不泄漏内存
-- [x] 全量编译零错误，firmware.elf 生成成功

@@ -301,7 +301,10 @@ static esp_err_t open_output_internal(uint32_t rate, bool allow_external_owner,
 
   int ret = esp_codec_dev_open(s_speaker_handle, &sample_cfg);
   if (ret != ESP_CODEC_DEV_OK) {
-    ESP_LOGE(TAG, "Failed to open speaker path at %" PRIu32 " Hz", rate);
+    ESP_LOGE(TAG, "Failed to open speaker path at %" PRIu32 " Hz (ret=%d)", rate, ret);
+    esp_codec_dev_close(s_speaker_handle);
+    s_output_open = false;
+    audio_output_notify_i2s_tx(false);
     return ESP_FAIL;
   }
 

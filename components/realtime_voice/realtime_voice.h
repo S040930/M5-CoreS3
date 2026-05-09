@@ -31,6 +31,8 @@ typedef struct {
     char url[256];
     char api_key[256];
     char model[128];
+    char voice[32];
+    char instructions[512];
 } realtime_voice_config_t;
 
 typedef void (*voice_ui_state_cb_t)(int state, const char *user, const char *assistant, const char *error);

@@ -3,6 +3,7 @@
 #include "audio/audio_output.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "iot_board.h"
@@ -96,6 +97,9 @@
 #define ENV_PRESSURE_NOMINAL_KPA 101.3f
 #define ENV_PRESSURE_BAND_KPA 5.0f
 #define ENV_MONITOR_MISSING_RETRY_MS 30000U
+#define ENV_SHT30_MEASURE_WAIT_MS 20U
+#define ENV_SHT30_READ_RETRY_DELAY_MS 10U
+#define ENV_SHT30_READ_RETRY_COUNT 10U
 #if CONFIG_FREERTOS_UNICORE
 #define ENV_MONITOR_TASK_CORE 0
 #else
@@ -132,6 +136,8 @@ typedef struct {
 typedef struct {
   bool valid;
   i2c_master_bus_handle_t bus;
+  i2c_master_bus_handle_t sensor_bus;
+  i2c_master_bus_handle_t grove_bus;
   i2c_master_dev_handle_t sht30;
   i2c_master_dev_handle_t qmp6988;
   uint8_t qmp_addr;
@@ -337,6 +343,11 @@ static uint16_t be16(const uint8_t *p) {
   return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
 
+static bool env_sht30_read_not_ready(esp_err_t err) {
+  return err == ESP_ERR_INVALID_STATE || err == ESP_ERR_INVALID_RESPONSE ||
+         err == ESP_ERR_TIMEOUT;
+}
+
 static int32_t qmp_temperature256(const env_qmp6988_cal_t *cal, int32_t dt) {
   int64_t wk1 = (int64_t)cal->a1 * (int64_t)dt;
   int64_t wk2 = ((int64_t)cal->a2 * (int64_t)dt) >> 14;
@@ -485,7 +496,7 @@ static esp_err_t env_qmp_finish_init(env_hw_t *hw) {
 }
 
 static esp_err_t env_qmp_try_addr(env_hw_t *hw, uint8_t addr) {
-  if (hw == NULL || hw->bus == NULL) {
+  if (hw == NULL || hw->sensor_bus == NULL) {
     return ESP_ERR_INVALID_STATE;
   }
 
@@ -495,7 +506,7 @@ static esp_err_t env_qmp_try_addr(env_hw_t *hw, uint8_t addr) {
       .scl_speed_hz = 100000,
   };
   i2c_master_dev_handle_t dev = NULL;
-  esp_err_t err = i2c_master_bus_add_device(hw->bus, &qmp_cfg, &dev);
+  esp_err_t err = i2c_master_bus_add_device(hw->sensor_bus, &qmp_cfg, &dev);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "QMP6988 add-device failed: addr=0x%02X err=%s",
              addr, esp_err_to_name(err));
@@ -546,6 +557,17 @@ static esp_err_t env_hw_init(env_hw_t *hw) {
              CONFIG_BSP_I2C_NUM, esp_err_to_name(err != ESP_OK ? err : ESP_ERR_INVALID_STATE));
     return err != ESP_OK ? err : ESP_ERR_INVALID_STATE;
   }
+
+  vTaskDelay(pdMS_TO_TICKS(200));
+
+  bool axp_ack = env_diag_addr_acked(hw->bus, 0x34);
+  if (!axp_ack) {
+    ESP_LOGW(TAG, "I2C bus check: AXP2101 (0x34) not responding - bus may not be initialized");
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  hw->sensor_bus = hw->bus;
+
   if (CONFIG_ENV_MONITOR_DEBUG_LOG) {
     env_log_i2c_discovery(hw->bus);
   }
@@ -562,6 +584,63 @@ static esp_err_t env_hw_init(env_hw_t *hw) {
     missing_mask |= 0x02;
   }
   if (missing_mask != 0) {
+    if (hw->grove_bus == NULL) {
+      ESP_LOGI(TAG, "Sensors not on internal bus, trying Grove Port A (I2C0: SDA=GPIO2 SCL=GPIO1)");
+      i2c_master_bus_config_t grove_cfg = {
+          .i2c_port = I2C_NUM_0,
+          .sda_io_num = GPIO_NUM_2,
+          .scl_io_num = GPIO_NUM_1,
+          .clk_source = I2C_CLK_SRC_DEFAULT,
+          .glitch_ignore_cnt = 7,
+          .flags.enable_internal_pullup = true,
+      };
+      esp_err_t grove_err = i2c_new_master_bus(&grove_cfg, &hw->grove_bus);
+      if (grove_err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        sht_ack = env_diag_addr_acked(hw->grove_bus, ENV_SHT30_ADDR);
+        qmp_primary_ack = env_diag_addr_acked(hw->grove_bus, ENV_QMP6988_ADDR_PRIMARY);
+        qmp_fallback_ack = env_diag_addr_acked(hw->grove_bus, ENV_QMP6988_ADDR_FALLBACK);
+        qmp_any_ack = qmp_primary_ack || qmp_fallback_ack;
+        if (sht_ack || qmp_any_ack) {
+          ESP_LOGI(TAG, "Found sensors on Grove Port A: SHT30=%s QMP6988=%s",
+                   sht_ack ? "yes" : "no", qmp_any_ack ? "yes" : "no");
+          hw->sensor_bus = hw->grove_bus;
+          missing_mask = 0;
+          if (!sht_ack) missing_mask |= 0x01;
+          if (!qmp_any_ack) missing_mask |= 0x02;
+        } else {
+          ESP_LOGW(TAG, "No sensors on Grove Port A - scanning all I2C addresses:");
+          for (uint8_t addr = 0x03; addr <= 0x77; addr++) {
+            if (env_diag_addr_acked(hw->grove_bus, addr)) {
+              ESP_LOGW(TAG, "  Grove bus: found device at 0x%02X", addr);
+            }
+          }
+        }
+      } else {
+        ESP_LOGW(TAG, "Grove Port A I2C init failed: %s", esp_err_to_name(grove_err));
+      }
+    } else {
+      sht_ack = env_diag_addr_acked(hw->grove_bus, ENV_SHT30_ADDR);
+      qmp_primary_ack = env_diag_addr_acked(hw->grove_bus, ENV_QMP6988_ADDR_PRIMARY);
+      qmp_fallback_ack = env_diag_addr_acked(hw->grove_bus, ENV_QMP6988_ADDR_FALLBACK);
+      qmp_any_ack = qmp_primary_ack || qmp_fallback_ack;
+      if (sht_ack || qmp_any_ack) {
+        hw->sensor_bus = hw->grove_bus;
+        missing_mask = 0;
+        if (!sht_ack) missing_mask |= 0x01;
+        if (!qmp_any_ack) missing_mask |= 0x02;
+      } else {
+        ESP_LOGW(TAG, "Grove retry: sensors not found - scanning all I2C addresses:");
+        for (uint8_t addr = 0x03; addr <= 0x77; addr++) {
+          if (env_diag_addr_acked(hw->grove_bus, addr)) {
+            ESP_LOGW(TAG, "  Grove bus: found device at 0x%02X", addr);
+          }
+        }
+      }
+    }
+  }
+
+  if (missing_mask != 0) {
     env_log_hw_absent(missing_mask);
     if (!sht_ack) {
       ESP_LOGW(TAG, "SHT30 probe failed: addr=0x%02X no ACK on shared bus",
@@ -571,6 +650,9 @@ static esp_err_t env_hw_init(env_hw_t *hw) {
       ESP_LOGW(TAG, "QMP6988 probe failed: addrs=0x%02X/0x%02X no ACK on shared bus",
                ENV_QMP6988_ADDR_PRIMARY, ENV_QMP6988_ADDR_FALLBACK);
     }
+    if (axp_ack) {
+      ESP_LOGW(TAG, "I2C bus is working (AXP2101 responds) but env sensors not found - sensors may not be populated");
+    }
     return ESP_ERR_NOT_FOUND;
   }
 
@@ -578,9 +660,9 @@ static esp_err_t env_hw_init(env_hw_t *hw) {
     i2c_device_config_t sht_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = ENV_SHT30_ADDR,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = 100000,
     };
-    err = i2c_master_bus_add_device(hw->bus, &sht_cfg, &hw->sht30);
+    err = i2c_master_bus_add_device(hw->sensor_bus, &sht_cfg, &hw->sht30);
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "SHT30 add-device failed: addr=0x%02X err=%s",
                ENV_SHT30_ADDR, esp_err_to_name(err));
@@ -620,16 +702,42 @@ static esp_err_t env_sht30_sample(env_hw_t *hw, float *temp_c, float *humidity_p
   if (hw == NULL || hw->sht30 == NULL || temp_c == NULL || humidity_pct == NULL) {
     return ESP_ERR_INVALID_ARG;
   }
+retry:
   const uint8_t cmd[2] = {0x24, 0x00};
   esp_err_t err = i2c_master_transmit(hw->sht30, cmd, sizeof(cmd), 200);
+  if (err == ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "SHT30 bus state error, resetting device");
+    i2c_master_bus_rm_device(hw->sht30);
+    hw->sht30 = NULL;
+    i2c_device_config_t sht_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = ENV_SHT30_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    if (i2c_master_bus_add_device(hw->sensor_bus, &sht_cfg, &hw->sht30) == ESP_OK) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      goto retry;
+    }
+    return ESP_ERR_TIMEOUT;
+  }
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "SHT30 measure command failed: addr=0x%02X cmd=0x2400 err=%s",
              ENV_SHT30_ADDR, esp_err_to_name(err));
     return err;
   }
-  vTaskDelay(pdMS_TO_TICKS(15));
+  vTaskDelay(pdMS_TO_TICKS(ENV_SHT30_MEASURE_WAIT_MS));
   uint8_t data[6] = {0};
-  err = i2c_master_receive(hw->sht30, data, sizeof(data), 200);
+  err = ESP_ERR_TIMEOUT;
+  for (uint32_t attempt = 0; attempt < ENV_SHT30_READ_RETRY_COUNT; ++attempt) {
+    err = i2c_master_receive(hw->sht30, data, sizeof(data), 200);
+    if (err == ESP_OK) {
+      break;
+    }
+    if (!env_sht30_read_not_ready(err)) {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(ENV_SHT30_READ_RETRY_DELAY_MS));
+  }
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "SHT30 sample read failed: addr=0x%02X len=%u err=%s",
              ENV_SHT30_ADDR, (unsigned)sizeof(data), esp_err_to_name(err));
@@ -956,6 +1064,13 @@ static void env_monitor_task(void *arg) {
 
     if (active_mask != 0) {
       maybe_schedule_reminder(active_mask, loop_ms, true);
+      event_env_data_t ev_data = {
+          .id = EVENT_ENV_THRESHOLD_EXCEEDED,
+          .temperature = temp_c,
+          .humidity = humidity_pct,
+          .pressure = pressure_kpa
+      };
+      event_bus_publish(EVENT_ENV_THRESHOLD_EXCEEDED, &ev_data, sizeof(ev_data));
     } else {
       if (!s_pending.pending) {
         s_temp_trigger.active = false;
@@ -964,6 +1079,16 @@ static void env_monitor_task(void *arg) {
         s_humid_trigger.active = false;
         s_pressure_trigger.active = false;
       }
+    }
+
+    {
+      event_env_data_t ev_data = {
+          .id = EVENT_ENV_DATA_READY,
+          .temperature = temp_c,
+          .humidity = humidity_pct,
+          .pressure = pressure_kpa
+      };
+      event_bus_publish(EVENT_ENV_DATA_READY, &ev_data, sizeof(ev_data));
     }
 
     try_send_pending();

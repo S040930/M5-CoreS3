@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "env_monitor.c"
+        "env_interface.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -8,5 +9,6 @@ idf_component_register(
         board_cores3
         esp_driver_i2c
         esp_timer
+        event_bus
         realtime_voice
 )

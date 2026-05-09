@@ -1,11 +1,16 @@
 #include "screen_ui.h"
 
 #include "bsp/m5stack_core_s3.h"
+#include "env_monitor.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "sdkconfig.h"
 #include "lvgl.h"
 #include "screen_ui_theme.h"
 #include "ui_renderer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +36,11 @@ static const char *TAG = "screen_ui";
 #define PF_BLINK_DUR       3   /* frames */
 
 #ifndef CONFIG_SCREEN_UI_ANIM_INTERVAL_MS
-#define CONFIG_SCREEN_UI_ANIM_INTERVAL_MS 100
+#define CONFIG_SCREEN_UI_ANIM_INTERVAL_MS 500
+#endif
+
+#ifndef CONFIG_SCREEN_UI_ANIM_STRESS_INTERVAL_MS
+#define CONFIG_SCREEN_UI_ANIM_STRESS_INTERVAL_MS 500
 #endif
 
 /* ========== Context ========== */
@@ -41,6 +50,7 @@ typedef struct {
   bool initialized;
   bool streaming;
   bool playing;
+  bool network_busy;
   screen_ui_state_t state;
   screen_ui_voice_state_t voice_state;
   void (*voice_ptt_callback)(void);
@@ -49,24 +59,39 @@ typedef struct {
   ui_renderer_t renderer;
   lv_obj_t *face_container;
 
+  /* Mic button */
+  lv_obj_t *mic_btn;
+  lv_obj_t *mic_label;
+
   /* Animation state */
   uint32_t anim_phase;
-  float cur_eye_open;   /* 0.0=closed, 1.0=open */
-  float cur_mouth_open; /* 0.0=closed, 1.0=open */
+  float cur_eye_open;
+  float cur_mouth_open;
   float pupil_offset_x;
   float breath_y;
   lv_color_t eye_sclera_color;
   lv_color_t mouth_color;
   bool blinking;
   int blink_timer;
+  bool render_dirty;
+  screen_ui_voice_state_t last_voice_state;
+  bool last_streaming;
+
+  float env_temp_c;
+  float env_humidity_pct;
+  float env_pressure_kpa;
+  bool env_data_valid;
 } screen_ui_ctx_t;
 
 static screen_ui_ctx_t s_ui = {0};
+
+static bool s_wdt_subscribed = false;
 
 static void screen_tap_event_cb(lv_event_t *event);
 static void anim_timer_cb(lv_timer_t *timer);
 static void render_pixel_face(void);
 static void set_colors_for_state(screen_ui_voice_state_t state);
+static void update_mic_button_state(screen_ui_voice_state_t voice_state);
 
 /* ========== Pixel drawing helpers ========== */
 static void draw_eye_block(ui_renderer_t *r, int cx, int cy, int size, float open, lv_color_t color) {
@@ -165,7 +190,34 @@ static void render_pixel_face(void) {
     }
   }
 
-  lv_obj_invalidate(s_ui.renderer.canvas);
+#if CONFIG_ENV_MONITOR_ENABLE
+  /* Sensor panel (env_monitor must expose valid readings for numbers; else "--") */
+  {
+    lv_color_t env_bg = lv_color_hex(0x1a1a1a);
+    const lv_font_t *env_font = &lv_font_montserrat_14;
+
+    if (s_ui.env_data_valid) {
+      lv_color_t env_fg = lv_color_hex(0x888888);
+      ui_renderer_draw_rect(r, 4, 62, 104, 52, env_bg, 160, true);
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%.1f C", s_ui.env_temp_c);
+      ui_renderer_draw_text(r, buf, 10, 66, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
+      snprintf(buf, sizeof(buf), "%.1f%%", s_ui.env_humidity_pct);
+      ui_renderer_draw_text(r, buf, 10, 90, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
+
+      ui_renderer_draw_rect(r, 212, 62, 104, 30, env_bg, 160, true);
+      snprintf(buf, sizeof(buf), "%.1fkPa", s_ui.env_pressure_kpa);
+      ui_renderer_draw_text(r, buf, 218, 70, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
+    } else {
+      lv_color_t env_fg = lv_color_hex(0x555555);
+      ui_renderer_draw_rect(r, 4, 62, 104, 52, env_bg, 160, true);
+      ui_renderer_draw_text(r, "--", 10, 66, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
+      ui_renderer_draw_text(r, "--", 10, 90, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
+      ui_renderer_draw_rect(r, 212, 62, 104, 30, env_bg, 160, true);
+      ui_renderer_draw_text(r, "--", 218, 70, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
+    }
+  }
+#endif
 }
 
 /* ========== Color helpers ========== */
@@ -203,10 +255,70 @@ static void anim_timer_cb(lv_timer_t *timer) {
   (void)timer;
   if (!s_ui.initialized) return;
 
+  TaskHandle_t lvgl_task = xTaskGetCurrentTaskHandle();
+  if (!s_wdt_subscribed && lvgl_task != NULL) {
+    esp_task_wdt_add(lvgl_task);
+    s_wdt_subscribed = true;
+    ESP_LOGI(TAG, "taskLVGL subscribed to TWDT (timeout=%us)", (unsigned)CONFIG_ESP_TASK_WDT_TIMEOUT_S);
+  }
+
   s_ui.anim_phase++;
 
-  /* Breathing float */
-  s_ui.breath_y = sinf((float)s_ui.anim_phase * 0.05f) * PF_BREATH_AMP;
+#if CONFIG_ENV_MONITOR_ENABLE
+  {
+    float prev_t = s_ui.env_temp_c;
+    float prev_h = s_ui.env_humidity_pct;
+    float prev_p = s_ui.env_pressure_kpa;
+    bool prev_valid = s_ui.env_data_valid;
+    bool valid = env_monitor_get_latest(&s_ui.env_temp_c, &s_ui.env_humidity_pct, &s_ui.env_pressure_kpa);
+    bool validity_changed = (valid != prev_valid);
+    bool values_changed =
+        valid && (fabsf(s_ui.env_temp_c - prev_t) > 0.05f || fabsf(s_ui.env_humidity_pct - prev_h) > 0.15f ||
+                  fabsf(s_ui.env_pressure_kpa - prev_p) > 0.03f);
+    if (validity_changed) {
+      s_ui.env_data_valid = valid;
+    }
+    if (validity_changed || values_changed) {
+      s_ui.render_dirty = true;
+    }
+  }
+#endif
+
+  esp_task_wdt_reset();
+
+  bool state_changed = (s_ui.voice_state != s_ui.last_voice_state) ||
+                       (s_ui.streaming != s_ui.last_streaming);
+  s_ui.last_voice_state = s_ui.voice_state;
+  s_ui.last_streaming = s_ui.streaming;
+
+  if (s_ui.blinking) {
+    s_ui.blink_timer--;
+    if (s_ui.blink_timer <= 0) {
+      s_ui.blinking = false;
+      s_ui.render_dirty = true;
+    }
+  } else {
+    int blink_chance = (s_ui.voice_state == SCREEN_UI_VOICE_SENDING) ? 4 : 1;
+    if ((rand() & 0xFF) < blink_chance) {
+      s_ui.blinking = true;
+      s_ui.blink_timer = PF_BLINK_DUR;
+      s_ui.render_dirty = true;
+    }
+  }
+
+  bool needs_render = state_changed || s_ui.render_dirty || s_ui.blinking ||
+                      (s_ui.voice_state == SCREEN_UI_VOICE_THINKING);
+
+  if (!needs_render) {
+    return;
+  }
+
+  int64_t start_us = esp_timer_get_time();
+
+  /* Breathing float - simplified to every 4 frames */
+  if ((s_ui.anim_phase & 3) == 0) {
+    s_ui.breath_y = sinf((float)s_ui.anim_phase * 0.0125f) * PF_BREATH_AMP;
+  }
 
   /* Determine target geometry from voice state */
   float target_eye = 1.0f;
@@ -223,9 +335,6 @@ static void anim_timer_cb(lv_timer_t *timer) {
     target_mouth = 0.0f;
     break;
   case SCREEN_UI_VOICE_LISTENING:
-    target_eye = 1.0f;
-    target_mouth = 0.0f;
-    break;
   case SCREEN_UI_VOICE_SENDING:
     target_eye = 1.0f;
     target_mouth = 0.0f;
@@ -233,7 +342,9 @@ static void anim_timer_cb(lv_timer_t *timer) {
   case SCREEN_UI_VOICE_THINKING:
     target_eye = 1.0f;
     target_mouth = 0.0f;
-    s_ui.pupil_offset_x = sinf((float)s_ui.anim_phase * 0.15f) * 8.0f;
+    if ((s_ui.anim_phase & 3) == 0) {
+      s_ui.pupil_offset_x = sinf((float)s_ui.anim_phase * 0.04f) * 8.0f;
+    }
     break;
   case SCREEN_UI_VOICE_SPEAKING:
     target_eye = 1.0f;
@@ -247,24 +358,12 @@ static void anim_timer_cb(lv_timer_t *timer) {
     break;
   }
 
-  /* Blink state machine */
   if (s_ui.blinking) {
-    s_ui.blink_timer--;
-    if (s_ui.blink_timer <= 0) {
-      s_ui.blinking = false;
-    }
     target_eye = 0.05f;
-  } else {
-    int blink_chance = (s_ui.voice_state == SCREEN_UI_VOICE_SENDING) ? 12 : 2;
-    if ((rand() % PF_BLINK_INTERVAL) < blink_chance) {
-      s_ui.blinking = true;
-      s_ui.blink_timer = PF_BLINK_DUR;
-      target_eye = 0.05f;
-    }
   }
 
   /* Smooth interpolation */
-  float lerp_t = 0.25f;
+  float lerp_t = 0.3f;
   s_ui.cur_eye_open += (target_eye - s_ui.cur_eye_open) * lerp_t;
   s_ui.cur_mouth_open += (target_mouth - s_ui.cur_mouth_open) * lerp_t;
 
@@ -275,13 +374,56 @@ static void anim_timer_cb(lv_timer_t *timer) {
 
   /* Render frame */
   render_pixel_face();
+  s_ui.render_dirty = false;
+
+  int64_t elapsed_ms = (esp_timer_get_time() - start_us) / 1000;
+  if (elapsed_ms > 50) {
+    ESP_LOGW(TAG, "anim render slow: %lld ms", elapsed_ms);
+  }
+  /* Canvas draws directly into lv_canvas buffer; must always invalidate or the LCD may not refresh. */
+  lv_obj_invalidate(s_ui.renderer.canvas);
+
+  esp_task_wdt_reset();
+}
+
+/* ========== Mic button state update ========== */
+static void update_mic_button_state(screen_ui_voice_state_t voice_state) {
+  if (!s_ui.initialized || s_ui.mic_btn == NULL) return;
+
+  switch (voice_state) {
+    case SCREEN_UI_VOICE_STANDBY:
+    case SCREEN_UI_VOICE_ERROR:
+      lv_obj_set_style_bg_color(s_ui.mic_btn, lv_color_hex(0x4CAF50), 0);
+      lv_obj_set_style_bg_opa(s_ui.mic_btn, LV_OPA_80, 0);
+      lv_obj_remove_state(s_ui.mic_btn, LV_STATE_DISABLED);
+      lv_obj_set_style_text_color(s_ui.mic_label, lv_color_hex(0xFFFFFF), 0);
+      break;
+
+    case SCREEN_UI_VOICE_CONNECTING:
+    case SCREEN_UI_VOICE_LISTENING:
+    case SCREEN_UI_VOICE_SENDING:
+      lv_obj_set_style_bg_color(s_ui.mic_btn, lv_color_hex(0x2196F3), 0);
+      lv_obj_set_style_bg_opa(s_ui.mic_btn, LV_OPA_100, 0);
+      lv_obj_set_style_text_color(s_ui.mic_label, lv_color_hex(0xFFFFFF), 0);
+      break;
+
+    case SCREEN_UI_VOICE_THINKING:
+    case SCREEN_UI_VOICE_SPEAKING:
+      lv_obj_set_style_bg_color(s_ui.mic_btn, lv_color_hex(0xFF9800), 0);
+      lv_obj_set_style_bg_opa(s_ui.mic_btn, LV_OPA_100, 0);
+      lv_obj_set_style_text_color(s_ui.mic_label, lv_color_hex(0xFFFFFF), 0);
+      break;
+
+    default:
+      break;
+  }
 }
 
 /* ========== Tap callback ========== */
 static void screen_tap_event_cb(lv_event_t *event) {
   (void)event;
   if (!s_ui.initialized) return;
-  if (s_ui.voice_state == SCREEN_UI_VOICE_OFF || s_ui.voice_state == SCREEN_UI_VOICE_STANDBY) {
+  if (s_ui.voice_state == SCREEN_UI_VOICE_OFF) {
     return;
   }
   if (s_ui.voice_ptt_callback != NULL) {
@@ -296,20 +438,32 @@ esp_err_t screen_ui_init(void) {
 
   bsp_display_cfg_t cfg = {
       .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
-      .buffer_size = BSP_LCD_H_RES * 20,
-      .double_buffer = true,
+      .buffer_size = BSP_LCD_H_RES * 10,
+      .double_buffer = false,
       .flags = {
-          .buff_dma = true,
+          .buff_dma = false,
           .buff_spiram = true,
       },
   };
-  /* Pin LVGL on CPU1 to keep CPU0 idle task schedulable (TWDT watches IDLE0). */
   cfg.lvgl_port_cfg.task_affinity = 1;
 
   lv_display_t *disp = bsp_display_start_with_config(&cfg);
   if (disp == NULL) {
     ESP_LOGE(TAG, "display start failed");
     return ESP_FAIL;
+  }
+
+  TaskHandle_t lvgl_task = xTaskGetHandle("taskLVGL");
+  if (lvgl_task != NULL) {
+    esp_err_t twdt_err = esp_task_wdt_add(lvgl_task);
+    if (twdt_err == ESP_OK) {
+      ESP_LOGI(TAG, "taskLVGL added to TWDT (prevents IDLE1 starvation)");
+    } else {
+      ESP_LOGW(TAG, "TWDT add failed: %s (TTL=%us)", esp_err_to_name(twdt_err),
+               (unsigned)CONFIG_ESP_TASK_WDT_TIMEOUT_S);
+    }
+  } else {
+    ESP_LOGW(TAG, "taskLVGL not found, cannot add to TWDT");
   }
 
   esp_err_t err = bsp_display_backlight_on();
@@ -343,6 +497,22 @@ esp_err_t screen_ui_init(void) {
   lv_obj_add_flag(s_ui.face_container, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(s_ui.face_container, screen_tap_event_cb, LV_EVENT_CLICKED, NULL);
 
+  /* Mic button - bottom center */
+  s_ui.mic_btn = lv_button_create(s_ui.screen);
+  lv_obj_set_size(s_ui.mic_btn, 80, 80);
+  lv_obj_set_pos(s_ui.mic_btn, (UI_SCREEN_WIDTH - 80) / 2, UI_SCREEN_HEIGHT - 100);
+  lv_obj_set_style_radius(s_ui.mic_btn, 40, 0);
+  lv_obj_set_style_bg_color(s_ui.mic_btn, lv_color_hex(0x4CAF50), 0);
+  lv_obj_set_style_bg_opa(s_ui.mic_btn, LV_OPA_80, 0);
+  lv_obj_add_flag(s_ui.mic_btn, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(s_ui.mic_btn, screen_tap_event_cb, LV_EVENT_CLICKED, NULL);
+
+  s_ui.mic_label = lv_label_create(s_ui.mic_btn);
+  lv_label_set_text(s_ui.mic_label, LV_SYMBOL_AUDIO);
+  lv_obj_set_style_text_font(s_ui.mic_label, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(s_ui.mic_label, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_center(s_ui.mic_label);
+
   /* Init animation state */
   s_ui.cur_eye_open = 1.0f;
   s_ui.cur_mouth_open = 0.0f;
@@ -351,13 +521,18 @@ esp_err_t screen_ui_init(void) {
   s_ui.anim_phase = 0;
   s_ui.blinking = false;
   s_ui.blink_timer = 0;
+  s_ui.render_dirty = true;
+  s_ui.last_voice_state = SCREEN_UI_VOICE_OFF;
+  s_ui.last_streaming = false;
   set_colors_for_state(SCREEN_UI_VOICE_STANDBY);
+  update_mic_button_state(SCREEN_UI_VOICE_STANDBY);
 
   s_ui.initialized = true;
   s_ui.state = SCREEN_UI_STATE_BOOT;
   s_ui.voice_state = SCREEN_UI_VOICE_OFF;
   s_ui.streaming = false;
   s_ui.playing = false;
+  s_ui.network_busy = false;
 
   s_ui.anim_timer = lv_timer_create(anim_timer_cb,
                                       (uint32_t)CONFIG_SCREEN_UI_ANIM_INTERVAL_MS, NULL);
@@ -377,8 +552,24 @@ void screen_ui_set_voice_ptt_callback(void (*callback)(void)) {
 }
 
 void screen_ui_set_voice_network_busy(bool busy) {
-  (void)busy;
   if (!s_ui.initialized) return;
+
+  if (s_ui.anim_timer == NULL) return;
+  if (s_ui.network_busy == busy) return;
+  if (!bsp_display_lock(pdMS_TO_TICKS(80))) return;
+
+  uint32_t target_ms = busy ? (uint32_t)CONFIG_SCREEN_UI_ANIM_STRESS_INTERVAL_MS
+                            : (uint32_t)CONFIG_SCREEN_UI_ANIM_INTERVAL_MS;
+  if (target_ms < 8U) {
+    target_ms = 8U;
+  }
+
+  lv_timer_set_period(s_ui.anim_timer, target_ms);
+  s_ui.network_busy = busy;
+  ESP_LOGI(TAG, "ui anim period -> %lu ms (network_busy=%d)",
+           (unsigned long)target_ms, (int)busy);
+
+  bsp_display_unlock();
 }
 
 void screen_ui_deinit(void) {
@@ -406,7 +597,10 @@ void screen_ui_set_state(screen_ui_state_t state, bool wifi_connected,
   (void)airplay_ready;
 
   s_ui.state = state;
-  s_ui.streaming = streaming;
+  if (s_ui.streaming != streaming) {
+    s_ui.streaming = streaming;
+    s_ui.render_dirty = true;
+  }
 
   if (!s_ui.initialized) return;
 }
@@ -432,12 +626,16 @@ void screen_ui_set_voice_state(screen_ui_voice_state_t state, const char *user_t
     state = SCREEN_UI_VOICE_STANDBY;
   }
 
-  s_ui.voice_state = state;
+  if (s_ui.voice_state != state) {
+    s_ui.voice_state = state;
+    s_ui.render_dirty = true;
+  }
 
   if (!s_ui.initialized) return;
   if (!bsp_display_lock(pdMS_TO_TICKS(80))) return;
 
   set_colors_for_state(state);
+  update_mic_button_state(state);
 
   bsp_display_unlock();
 }

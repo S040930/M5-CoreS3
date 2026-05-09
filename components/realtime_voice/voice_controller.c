@@ -1,13 +1,16 @@
 #include "voice_controller.h"
 #include "voice_frontend_v2.h"
-#include "voice_api_client.h"
+#include "omni_client.h"
 #include "voice_player.h"
 #include "voice_internal_types.h"
 #include "voice_common.h"
 #include "voice_dsp.h"
 #include "voice_playout.h"
 #include "voice_speaker.h"
+#include "voice_events.h"
 #include "audio/audio_output.h"
+#include "audio/audio_output_common.h"
+#include "resource/resource_manager.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -21,14 +24,16 @@
 
 #define CONTROLLER_TASK_STACK 16384
 #define CONTROLLER_TASK_PRIO 4
-#define VOICE_ONESHOT_RECORD_MAX_MS 4000
-#define VOICE_SAMPLE_RATE 16000
+#define VOICE_ONESHOT_RECORD_MAX_MS 3000
+#define VOICE_SAMPLE_RATE 8000
 #define VAD_CONSEC_FRAMES 1
 
-// Forward declarations from realtime_voice.c (public API)
+#define STATE_TIMEOUT_REQUESTING_MS 30000
+#define STATE_TIMEOUT_PLAYING_MS     60000
+#define AIRPLAY_POLL_INTERVAL_MS     200
+
 extern voice_ui_state_cb_t realtime_voice_get_ui_state_cb(void);
 extern voice_ui_network_busy_cb_t realtime_voice_get_ui_network_busy_cb(void);
-extern voice_airplay_query_cb_t realtime_voice_get_airplay_query_cb(void);
 extern voice_airplay_refresh_cb_t realtime_voice_get_airplay_refresh_cb(void);
 extern voice_network_query_cb_t realtime_voice_get_network_query_cb(void);
 
@@ -70,6 +75,9 @@ static struct {
     char last_assistant[256];
 
     bool user_speech_notified;
+    uint64_t state_enter_ms;
+    SemaphoreHandle_t state_lock;
+    bool player_started;
 } s = {0};
 
 static void set_ui_state(int state, const char* user, const char* assistant, const char* error) {
@@ -97,29 +105,40 @@ static bool is_network_ready(void) {
 }
 
 static bool is_airplay_active_now(void) {
-    voice_airplay_query_cb_t airplay_cb = realtime_voice_get_airplay_query_cb();
-    return (airplay_cb != NULL) ? airplay_cb() : false;
+    return resource_manager_is_airplay_active();
 }
 
 static void frontend_event_cb(const voice_frontend_event_t* event, void* user_data) {
     (void)user_data;
-    if (is_airplay_active_now()) {
+
+    if (s.state_lock) xSemaphoreTake(s.state_lock, portMAX_DELAY);
+    bool airplay_active = is_airplay_active_now();
+    bool recording = s.recording;
+    if (s.state_lock) xSemaphoreGive(s.state_lock);
+
+    if (airplay_active) {
         return;
     }
 
     if (event->type == VOICE_FRONTEND_EVENT_WAKE) {
+        if (s.state_lock) xSemaphoreTake(s.state_lock, portMAX_DELAY);
         if (!s.armed) {
             s.armed = true;
             s.recording = true;
             s.record_pos = 0;
             s.record_start_ms = esp_timer_get_time() / 1000;
             s.vad_hit_count = 0;
+            if (s.state_lock) xSemaphoreGive(s.state_lock);
+
             snprintf(s.last_user, sizeof(s.last_user), "%s", "[recording]");
             set_ui_state(REALTIME_VOICE_STATE_LISTENING, s.last_user, NULL, NULL);
+            voice_publish_wakeword_detected();
             ESP_LOGI(TAG, "Wake detected, started recording");
+        } else {
+            if (s.state_lock) xSemaphoreGive(s.state_lock);
         }
     } else if (event->type == VOICE_FRONTEND_EVENT_AUDIO) {
-        if (s.recording && s.record_pos < s.record_cap) {
+        if (recording && s.record_pos < s.record_cap) {
             size_t copy_frames = event->pcm_frames;
             if (s.record_pos + copy_frames > s.record_cap) {
                 copy_frames = s.record_cap - s.record_pos;
@@ -141,18 +160,66 @@ static void player_event_cb(voice_player_event_type_t event, void* user_data) {
 
     if (event == VOICE_PLAYER_EVENT_STOPPED) {
         ESP_LOGI(TAG, "Playback stopped");
+        voice_publish_playback_end();
         voice_airplay_refresh_cb_t refresh_cb = realtime_voice_get_airplay_refresh_cb();
         if (refresh_cb) {
             refresh_cb();
         }
+        if (s.state_lock) xSemaphoreTake(s.state_lock, portMAX_DELAY);
         s.state = CTRL_STATE_IDLE;
-        set_ui_state(REALTIME_VOICE_STATE_LISTENING, NULL, NULL, NULL);
+        s.state_enter_ms = esp_timer_get_time() / 1000;
+        if (s.state_lock) xSemaphoreGive(s.state_lock);
+        set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
+        audio_output_common_apply_context_fidelity(
+            resource_manager_is_airplay_active(), false);
     }
 }
 
-static void response_audio_cb(const int16_t* pcm, size_t frames, uint32_t sample_rate, void* user_data) {
+static void omni_on_audio_delta(const int16_t *pcm, size_t frames, uint32_t sample_rate, void *user_data) {
     (void)user_data;
+    if (!s.player_started) {
+        s.player_started = true;
+        esp_err_t player_err = voice_player_start();
+        if (player_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start voice player: %s", esp_err_to_name(player_err));
+            return;
+        }
+        s.state = CTRL_STATE_PLAYING;
+        s.state_enter_ms = esp_timer_get_time() / 1000;
+        set_ui_state(REALTIME_VOICE_STATE_SPEAKING, s.last_user, NULL, NULL);
+        ESP_LOGI(TAG, "Player started on first audio chunk");
+    }
     voice_player_feed(pcm, frames, sample_rate);
+}
+
+static void omni_on_text_delta(const char *text, size_t len, void *user_data) {
+    (void)user_data;
+    if (len > 0 && text != NULL) {
+        size_t copy = len < sizeof(s.last_assistant) - 1 ? len : sizeof(s.last_assistant) - 1;
+        memcpy(s.last_assistant, text, copy);
+        s.last_assistant[copy] = '\0';
+        ESP_LOGI(TAG, "text delta: %.*s", (int)len, text);
+    }
+}
+
+static void omni_on_response_done(void *user_data) {
+    (void)user_data;
+    ESP_LOGI(TAG, "Omni response done");
+    s.player_started = false;
+}
+
+static void omni_on_error(esp_err_t err, const char *message, void *user_data) {
+    (void)user_data;
+    ESP_LOGE(TAG, "Omni error: %s (%s)", message ? message : "unknown", esp_err_to_name(err));
+}
+
+static void log_stack_watermark(const char* reason) {
+    UBaseType_t watermark = uxTaskGetStackHighWaterMark(NULL);
+    if (watermark < 500) {
+        ESP_LOGW(TAG, "stack low[%s]: free_words=%lu", reason, (unsigned long)watermark);
+    } else {
+        ESP_LOGD(TAG, "stack watermark[%s]: free_words=%lu", reason, (unsigned long)watermark);
+    }
 }
 
 static void controller_task(void* arg) {
@@ -174,17 +241,26 @@ static void controller_task(void* arg) {
     voice_frontend_v2_init(s.mic_dev, frontend_event_cb, NULL);
     voice_player_init(s.spk_dev, player_event_cb, NULL);
 
-    voice_api_config_t api_cfg = {0};
-    strncpy(api_cfg.url, s.config.url, sizeof(api_cfg.url) - 1);
-    strncpy(api_cfg.api_key, s.config.api_key, sizeof(api_cfg.api_key) - 1);
-    strncpy(api_cfg.model, s.config.model, sizeof(api_cfg.model) - 1);
-    voice_api_client_init(&api_cfg);
+    omni_client_config_t omni_cfg = {0};
+    strncpy(omni_cfg.api_key, s.config.api_key, sizeof(omni_cfg.api_key) - 1);
+    strncpy(omni_cfg.model, s.config.model, sizeof(omni_cfg.model) - 1);
+    strncpy(omni_cfg.voice, s.config.voice, sizeof(omni_cfg.voice) - 1);
+    strncpy(omni_cfg.instructions, s.config.instructions, sizeof(omni_cfg.instructions) - 1);
+
+    omni_client_callbacks_t omni_cbs = {
+        .user_data = NULL,
+        .on_text_delta = omni_on_text_delta,
+        .on_audio_delta = omni_on_audio_delta,
+        .on_response_done = omni_on_response_done,
+        .on_error = omni_on_error,
+    };
+    omni_client_init(&omni_cfg, &omni_cbs);
 
     s.state = CTRL_STATE_IDLE;
-    set_ui_state(REALTIME_VOICE_STATE_LISTENING, NULL, NULL, NULL);
+    s.state_enter_ms = esp_timer_get_time() / 1000;
+    set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
 
     while (s.running) {
-        // Check network
         if (!is_network_ready()) {
             if (voice_frontend_v2_is_running()) {
                 voice_frontend_v2_pause("no_network");
@@ -193,7 +269,6 @@ static void controller_task(void* arg) {
             continue;
         }
 
-        // Check AirPlay
         bool airplay_active = is_airplay_active_now();
         if (airplay_active) {
             s.mode = DEVICE_MODE_AIRPLAY;
@@ -207,20 +282,18 @@ static void controller_task(void* arg) {
                     refresh_cb();
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(AIRPLAY_POLL_INTERVAL_MS));
             continue;
         }
 
         s.mode = DEVICE_MODE_VOICE;
 
-        // Resume frontend if paused
         if (!voice_frontend_v2_is_running()) {
             voice_frontend_v2_start();
         } else if (voice_frontend_v2_is_paused()) {
             voice_frontend_v2_resume();
         }
 
-        // Auto-arm only when wake-word mode is disabled.
 #if !CONFIG_VOICE_ACTIVATION_PHRASE_ENABLE
         if (!s.armed && !s.recording) {
             s.armed = true;
@@ -233,33 +306,33 @@ static void controller_task(void* arg) {
         }
 #endif
 
-        // Check for user speech notification
         if (s.user_speech_notified) {
             s.user_speech_notified = false;
             s.vad_hit_count = VAD_CONSEC_FRAMES + 1;
+            voice_publish_speech_start();
         }
 
-        // Handle recording timeout
         if (s.recording) {
             uint64_t now = esp_timer_get_time() / 1000;
             uint64_t elapsed = now - s.record_start_ms;
 
-            // End recording if no VAD for a while or max time reached
             bool should_end = (elapsed > VOICE_ONESHOT_RECORD_MAX_MS) ||
                             (s.vad_hit_count == 0 && elapsed > 1500);
 
             if (should_end && s.record_pos > 0) {
                 ESP_LOGI(TAG, "Recording ended, %u frames", s.record_pos);
+                voice_publish_speech_end();
 
-                // Stop recording
                 s.recording = false;
                 s.armed = false;
 
-                // Pause frontend
+                audio_output_common_apply_context_fidelity(
+                    resource_manager_is_airplay_active(), true);
+
                 voice_frontend_v2_pause("uploading");
 
-                // Send request
                 s.state = CTRL_STATE_REQUESTING;
+                s.state_enter_ms = esp_timer_get_time() / 1000;
                 set_ui_state(REALTIME_VOICE_STATE_THINKING, s.last_user, NULL, NULL);
                 notify_network_busy(true);
 
@@ -269,68 +342,89 @@ static void controller_task(void* arg) {
                     .sample_rate = VOICE_SAMPLE_RATE
                 };
 
-                if (is_airplay_active_now()) {
-                    ESP_LOGW(TAG, "Voice request blocked: airplay active");
-                    notify_network_busy(false);
-                    s.state = CTRL_STATE_IDLE;
-                    s.record_pos = 0;
-                    s.vad_hit_count = 0;
-                    continue;
-                }
+                esp_err_t err = omni_client_send_audio(
+                    req.pcm_data, req.pcm_frames, req.sample_rate);
 
-                // Start player before request
-                esp_err_t play_start_err = voice_player_start();
-                if (play_start_err != ESP_OK) {
-                    ESP_LOGW(TAG, "Voice player start blocked: %s", esp_err_to_name(play_start_err));
-                    notify_network_busy(false);
-                    s.state = CTRL_STATE_IDLE;
-                    s.record_pos = 0;
-                    s.vad_hit_count = 0;
-                    continue;
-                }
-
-                esp_err_t err = voice_api_client_send_audio(
-                    &req, response_audio_cb, NULL,
-                    s.last_assistant, sizeof(s.last_assistant));
-
+                voice_publish_request_send(NULL);
                 notify_network_busy(false);
 
-                if (err == ESP_OK) {
-                    s.state = CTRL_STATE_PLAYING;
-                    set_ui_state(REALTIME_VOICE_STATE_SPEAKING, NULL, s.last_assistant, NULL);
-                } else {
-                    ESP_LOGE(TAG, "Request failed: %s", esp_err_to_name(err));
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Omni request failed: %s", esp_err_to_name(err));
+                    set_ui_state(REALTIME_VOICE_STATE_ERROR, NULL, NULL, "API request failed");
                     voice_player_stop();
                     s.state = CTRL_STATE_IDLE;
-                    set_ui_state(REALTIME_VOICE_STATE_ERROR, NULL, NULL, "API request failed");
+                    s.state_enter_ms = esp_timer_get_time() / 1000;
                 }
 
-                // Reset recording
                 s.record_pos = 0;
                 s.vad_hit_count = 0;
+
+                if (s.state == CTRL_STATE_PLAYING) {
+                    bool player_active = voice_player_is_active();
+                    if (!player_active) {
+                        ESP_LOGI(TAG, "Player not active after request, going idle");
+                        s.state = CTRL_STATE_IDLE;
+                        s.state_enter_ms = esp_timer_get_time() / 1000;
+                        set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
+                    }
+                }
+
+                if (!voice_frontend_v2_is_running()) {
+                    voice_frontend_v2_start();
+                }
             }
         }
 
-        // Check if we should interrupt
         if (s.interrupt_requested) {
             s.interrupt_requested = false;
-            if (s.state == CTRL_STATE_PLAYING) {
+            if (s.state == CTRL_STATE_PLAYING || s.state == CTRL_STATE_REQUESTING) {
                 ESP_LOGI(TAG, "Interrupting response");
                 voice_player_stop();
+                s.player_started = false;
                 s.state = CTRL_STATE_IDLE;
-                set_ui_state(REALTIME_VOICE_STATE_LISTENING, NULL, NULL, NULL);
+                s.state_enter_ms = esp_timer_get_time() / 1000;
+                set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
             }
+        }
+
+        uint64_t now_ms = esp_timer_get_time() / 1000;
+        uint64_t state_elapsed = now_ms - s.state_enter_ms;
+        if (s.state == CTRL_STATE_REQUESTING && state_elapsed > STATE_TIMEOUT_REQUESTING_MS) {
+            ESP_LOGE(TAG, "REQUESTING state timeout (%llums > %dms), aborting",
+                     (unsigned long long)state_elapsed, STATE_TIMEOUT_REQUESTING_MS);
+            omni_client_deinit();
+            voice_player_stop();
+            s.player_started = false;
+            s.state = CTRL_STATE_IDLE;
+            s.state_enter_ms = now_ms;
+            s.record_pos = 0;
+            s.vad_hit_count = 0;
+            set_ui_state(REALTIME_VOICE_STATE_ERROR, NULL, NULL, "API timeout");
+            notify_network_busy(false);
+        } else if (s.state == CTRL_STATE_PLAYING && state_elapsed > STATE_TIMEOUT_PLAYING_MS) {
+            ESP_LOGW(TAG, "PLAYING state timeout (%llums > %dms), stopping",
+                     (unsigned long long)state_elapsed, STATE_TIMEOUT_PLAYING_MS);
+            voice_player_stop();
+            s.player_started = false;
+            s.state = CTRL_STATE_IDLE;
+            s.state_enter_ms = now_ms;
+            set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
+        }
+
+        static uint32_t stack_check_counter = 0;
+        if (++stack_check_counter >= 500) {
+            stack_check_counter = 0;
+            log_stack_watermark("ctrl");
         }
 
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 
-    // Cleanup
     voice_frontend_v2_stop();
     voice_frontend_v2_deinit();
     voice_player_stop();
     voice_player_deinit();
-    voice_api_client_deinit();
+    omni_client_deinit();
 
     if (s.record_buf) {
         heap_caps_free(s.record_buf);
@@ -357,16 +451,18 @@ esp_err_t voice_controller_init(const realtime_voice_config_t* config,
     s.mic_dev = mic_dev;
     s.spk_dev = spk_dev;
 
-    // Keep mic device configuration from old code
     esp_codec_set_disable_when_closed(s.mic_dev, false);
-    
-    // Initialize speaker handles
+
     voice_speaker_set_handles(s.mic_dev, s.spk_dev);
 
-    // Initialize playout
     voice_playout_init(0);
 
-    // Load from config if not set
+    s.state_lock = xSemaphoreCreateMutex();
+    if (s.state_lock == NULL) {
+        ESP_LOGE(TAG, "Failed to create state lock");
+        return ESP_ERR_NO_MEM;
+    }
+
     if (s.config.url[0] == '\0' && strlen(CONFIG_VOICE_REALTIME_URL) > 0) {
         strncpy(s.config.url, CONFIG_VOICE_REALTIME_URL, sizeof(s.config.url) - 1);
     }
@@ -376,6 +472,8 @@ esp_err_t voice_controller_init(const realtime_voice_config_t* config,
     if (s.config.model[0] == '\0' && strlen(CONFIG_VOICE_MODEL) > 0) {
         strncpy(s.config.model, CONFIG_VOICE_MODEL, sizeof(s.config.model) - 1);
     }
+
+    // omni_client_init is called in controller_task with proper callbacks
 
     s.initialized = true;
     s.enabled = true;
@@ -397,6 +495,11 @@ void voice_controller_deinit(void) {
         s.task_stack = NULL;
     }
 
+    if (s.state_lock) {
+        vSemaphoreDelete(s.state_lock);
+        s.state_lock = NULL;
+    }
+
     s.initialized = false;
     ESP_LOGI(TAG, "Controller deinitialized");
 }
@@ -410,7 +513,6 @@ esp_err_t voice_controller_start(void) {
         return ESP_OK;
     }
 
-    // Allocate task stack
     if (s.task_stack == NULL) {
         s.task_stack = heap_caps_malloc(CONTROLLER_TASK_STACK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (s.task_stack == NULL) {
@@ -468,7 +570,6 @@ bool voice_controller_is_enabled(void) {
 }
 
 void voice_controller_on_airplay_active(bool active) {
-    // Not used here - handled in task loop
     (void)active;
 }
 
@@ -516,44 +617,8 @@ esp_err_t voice_controller_speak_text(const char* text) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Speak text: %s", text);
-
-    // Pause frontend
-    if (voice_frontend_v2_is_running()) {
-        voice_frontend_v2_pause("speak_text");
-    }
-
-    set_ui_state(REALTIME_VOICE_STATE_THINKING, NULL, NULL, NULL);
-    notify_network_busy(true);
-
-    // Start player
-    esp_err_t play_start_err = voice_player_start();
-    if (play_start_err != ESP_OK) {
-        notify_network_busy(false);
-        ESP_LOGW(TAG, "Speak text player start blocked: %s", esp_err_to_name(play_start_err));
-        return play_start_err;
-    }
-
-    esp_err_t err = voice_api_client_send_text(
-        text, response_audio_cb, NULL,
-        s.last_assistant, sizeof(s.last_assistant));
-
-    notify_network_busy(false);
-
-    if (err == ESP_OK) {
-        s.state = CTRL_STATE_PLAYING;
-        set_ui_state(REALTIME_VOICE_STATE_SPEAKING, NULL, s.last_assistant, NULL);
-    } else {
-        ESP_LOGE(TAG, "Text-to-speech failed: %s", esp_err_to_name(err));
-        voice_player_stop();
-        set_ui_state(REALTIME_VOICE_STATE_ERROR, NULL, NULL, "TTS failed");
-        // Resume frontend
-        if (!voice_frontend_v2_is_running()) {
-            voice_frontend_v2_start();
-        }
-    }
-
-    return err;
+    ESP_LOGI(TAG, "Speak text: %s (not supported in omni mode)", text);
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 bool voice_controller_is_activation_armed(void) {

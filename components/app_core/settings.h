@@ -18,4 +18,6 @@ esp_err_t settings_get_voice_url(char *url, size_t len);
 esp_err_t settings_set_voice_url(const char *url);
 esp_err_t settings_get_voice_model(char *model, size_t len);
 esp_err_t settings_set_voice_model(const char *model);
+esp_err_t settings_get_voice_instructions(char *instructions, size_t len);
+esp_err_t settings_set_voice_instructions(const char *instructions);
 bool settings_has_voice_config(void);

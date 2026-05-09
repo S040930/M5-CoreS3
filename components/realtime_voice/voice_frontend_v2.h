@@ -9,6 +9,7 @@
 extern "C" {
 #endif
 
+esp_err_t voice_frontend_v2_prepare(void);
 esp_err_t voice_frontend_v2_init(esp_codec_dev_handle_t mic_dev, voice_frontend_event_cb_t event_cb, void* user_data);
 void voice_frontend_v2_deinit(void);
 

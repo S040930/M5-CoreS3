@@ -100,10 +100,14 @@ void ui_renderer_deinit(ui_renderer_t *r) {
 void ui_renderer_clear(ui_renderer_t *r, lv_color_t color) {
     if (!r || !r->buf) return;
     uint16_t c = color_to_u16(color);
-    uint16_t *pixels = (uint16_t *)r->buf;
     size_t count = UI_SCREEN_WIDTH * UI_SCREEN_HEIGHT;
-    for (size_t i = 0; i < count; i++) {
-        pixels[i] = c;
+    if (c == 0) {
+        memset(r->buf, 0, count * 2);
+    } else {
+        uint16_t *pixels = (uint16_t *)r->buf;
+        for (size_t i = 0; i < count; i++) {
+            pixels[i] = c;
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 #include "realtime_voice.h"
 #include "voice_controller.h"
+#include "voice_frontend_v2.h"
 #include "audio/audio_output.h"
 #include "esp_log.h"
 #include "esp_codec_dev.h"
@@ -49,7 +50,6 @@ void realtime_voice_set_network_query_cb(voice_network_query_cb_t cb) {
 
 esp_err_t realtime_voice_start(void) {
     if (!s_initialized) {
-        // Get codec device handles
         void *mic_handle = NULL;
         void *spk_handle = NULL;
         if (audio_output_get_mic_handle(&mic_handle) != ESP_OK ||
@@ -57,7 +57,6 @@ esp_err_t realtime_voice_start(void) {
             return ESP_ERR_INVALID_STATE;
         }
 
-        // Initialize controller
         esp_err_t err = voice_controller_init(&s_config, (esp_codec_dev_handle_t)mic_handle, (esp_codec_dev_handle_t)spk_handle);
         if (err != ESP_OK) {
             return err;
@@ -111,7 +110,6 @@ bool realtime_voice_config_ready(void) {
 
 esp_err_t realtime_voice_speak_text(const char* text) {
     if (!s_initialized) {
-        // Get codec device handles
         void *mic_handle = NULL;
         void *spk_handle = NULL;
         if (audio_output_get_mic_handle(&mic_handle) != ESP_OK ||
@@ -119,7 +117,6 @@ esp_err_t realtime_voice_speak_text(const char* text) {
             return ESP_ERR_INVALID_STATE;
         }
 
-        // Initialize controller
         esp_err_t err = voice_controller_init(&s_config, (esp_codec_dev_handle_t)mic_handle, (esp_codec_dev_handle_t)spk_handle);
         if (err != ESP_OK) {
             return err;

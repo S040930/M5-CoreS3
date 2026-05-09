@@ -17,6 +17,7 @@ static char s_device_name[65] = SETTINGS_DEFAULT_DEVICE_NAME;
 static char s_voice_url[256] = {0};
 static char s_voice_model[128] = {0};
 static char s_voice_api_key[128] = {0};
+static char s_voice_instructions[512] = {0};
 static bool s_voice_loaded = false;
 
 static esp_err_t persist_voice_str(const char *key, const char *value) {
@@ -61,6 +62,9 @@ esp_err_t settings_init(void) {
     s_voice_loaded = true;
   len = sizeof(s_voice_api_key);
   if (nvs_get_str(nvs, "voice_api_key", s_voice_api_key, &len) == ESP_OK)
+    s_voice_loaded = true;
+  len = sizeof(s_voice_instructions);
+  if (nvs_get_str(nvs, "voice_instructions", s_voice_instructions, &len) == ESP_OK)
     s_voice_loaded = true;
 
   nvs_close(nvs);
@@ -137,6 +141,21 @@ esp_err_t settings_set_voice_api_key(const char *api_key) {
   s_voice_api_key[sizeof(s_voice_api_key) - 1] = '\0';
   s_voice_loaded = true;
   return persist_voice_str("voice_api_key", s_voice_api_key);
+}
+
+esp_err_t settings_get_voice_instructions(char *instructions, size_t len) {
+  if (!instructions || len == 0) return ESP_ERR_INVALID_ARG;
+  strncpy(instructions, s_voice_instructions, len - 1);
+  instructions[len - 1] = '\0';
+  return strlen(s_voice_instructions) > 0 ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t settings_set_voice_instructions(const char *instructions) {
+  if (!instructions) return ESP_ERR_INVALID_ARG;
+  strncpy(s_voice_instructions, instructions, sizeof(s_voice_instructions) - 1);
+  s_voice_instructions[sizeof(s_voice_instructions) - 1] = '\0';
+  s_voice_loaded = true;
+  return persist_voice_str("voice_instructions", s_voice_instructions);
 }
 
 bool settings_has_voice_config(void) {

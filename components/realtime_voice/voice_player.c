@@ -16,10 +16,9 @@
 #include <string.h>
 
 #define TAG "voice_player_v2"
-#define VOICE_PLAYER_RING_MS 3000U
+#define VOICE_PLAYER_RING_MS 5000U
 #define VOICE_PLAYER_PREFILL_MS 500U
-#define VOICE_HW_CHANNELS 2U
-#define SILENCE_TIMEOUT_MS 1000  // Stop playing if no audio for 1 second
+#define SILENCE_TIMEOUT_MS 5000
 
 static bool s_initialized = false;
 static bool s_playing = false;
@@ -31,8 +30,10 @@ static void* s_event_cb_user_data = NULL;
 static audio_ringbuf_t* s_ringbuf = NULL;
 static int16_t* s_hw_buf = NULL;
 static int16_t* s_stereo_buf = NULL;
+static int16_t* s_rs_out_buf = NULL;
 static size_t s_hw_cap = 0;
 static size_t s_stereo_cap = 0;
+static size_t s_rs_out_cap = 0;
 
 static uint32_t s_current_rate = 24000;
 static uint32_t s_prefill_ms = VOICE_PLAYER_PREFILL_MS;
@@ -42,6 +43,11 @@ static StaticTask_t s_play_task_buf;
 static StackType_t* s_play_task_stack = NULL;
 
 static uint64_t s_last_audio_time_ms = 0;
+
+#define DC_CORRECTION_ALPHA 0.995f
+static float s_dc_offset = 0.0f;
+
+#define VOICE_PLAYER_GAIN 1.5f
 
 static void* playout_alloc(size_t bytes) {
     void* p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -62,22 +68,33 @@ static void voice_player_task(void* arg) {
     ESP_LOGI(TAG, "Play task started");
 
     uint32_t hw_rate = voice_hw_codec_rate_hz();
-    size_t chunk_frames = hw_rate * 20 / 1000; // 20ms chunks
+    size_t chunk_frames = hw_rate * 20 / 1000;
 
-    // Ensure work buffers
+    double rs_ratio = (s_current_rate > 0 && s_current_rate != hw_rate)
+                          ? (double)hw_rate / (double)s_current_rate
+                          : 1.0;
+    size_t max_rs_frames = voice_rs_output_cap(chunk_frames, rs_ratio);
+
     if (s_hw_cap < chunk_frames) {
         if (s_hw_buf) playout_free(s_hw_buf);
         s_hw_buf = (int16_t*)playout_alloc(chunk_frames * sizeof(int16_t));
         s_hw_cap = chunk_frames;
     }
 
-    if (s_stereo_cap < chunk_frames * VOICE_HW_CHANNELS) {
-        if (s_stereo_buf) playout_free(s_stereo_buf);
-        s_stereo_buf = (int16_t*)playout_alloc(chunk_frames * VOICE_HW_CHANNELS * sizeof(int16_t));
-        s_stereo_cap = chunk_frames * VOICE_HW_CHANNELS;
+    if (s_rs_out_cap < max_rs_frames) {
+        if (s_rs_out_buf) playout_free(s_rs_out_buf);
+        s_rs_out_buf = (int16_t*)playout_alloc(max_rs_frames * sizeof(int16_t));
+        s_rs_out_cap = max_rs_frames;
     }
 
-    if (s_hw_buf == NULL || s_stereo_buf == NULL) {
+    size_t stereo_need = max_rs_frames * VOICE_HW_CHANNELS;
+    if (s_stereo_cap < stereo_need) {
+        if (s_stereo_buf) playout_free(s_stereo_buf);
+        s_stereo_buf = (int16_t*)playout_alloc(stereo_need * sizeof(int16_t));
+        s_stereo_cap = stereo_need;
+    }
+
+    if (s_hw_buf == NULL || s_stereo_buf == NULL || s_rs_out_buf == NULL) {
         ESP_LOGE(TAG, "Failed to allocate work buffers");
         s_playing = false;
         if (s_event_cb) {
@@ -87,7 +104,8 @@ static void voice_player_task(void* arg) {
         return;
     }
 
-    // Prefill wait
+    voice_play_rs_reset();
+
     while (s_playing && audio_ringbuf_avail(s_ringbuf) < (s_prefill_ms * s_current_rate / 1000)) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -98,6 +116,8 @@ static void voice_player_task(void* arg) {
     }
 
     s_prefilled = true;
+    ESP_LOGI(TAG, "Prefill done, entering play loop: rate=%u hw_rate=%u buf_avail=%u",
+             (unsigned)s_current_rate, (unsigned)hw_rate, (unsigned)audio_ringbuf_avail(s_ringbuf));
     if (s_event_cb) {
         s_event_cb(VOICE_PLAYER_EVENT_STARTED, s_event_cb_user_data);
     }
@@ -128,9 +148,7 @@ static void voice_player_task(void* arg) {
         size_t out_frames = read;
 
         if (s_current_rate != hw_rate) {
-            // Need resampling
             if (voice_rs_play_rs() == NULL) {
-                // Set the stream format first for voice_playout
                 voice_pcm_format_t fmt = {
                     .sample_rate_hz = s_current_rate,
                     .channels = 1,
@@ -139,12 +157,14 @@ static void voice_player_task(void* arg) {
                 voice_playout_set_stream_format(&fmt);
                 voice_rs_play_ensure();
             }
-            // Resample
-            out_frames = voice_rs_process_mono(voice_rs_play_rs(), voice_rs_play_ratio(), 
-                                               s_hw_buf, read, s_stereo_buf, s_stereo_cap / VOICE_HW_CHANNELS);
+            out_frames = voice_rs_process_mono(voice_rs_play_rs(), voice_rs_play_ratio(),
+                                               s_hw_buf, read, s_rs_out_buf, s_rs_out_cap);
+            for (size_t i = 0; i < out_frames; i++) {
+                s_stereo_buf[i * 2] = s_rs_out_buf[i];
+                s_stereo_buf[i * 2 + 1] = s_rs_out_buf[i];
+            }
             out_samples = s_stereo_buf;
         } else {
-            // Convert mono to stereo
             for (size_t i = 0; i < read; i++) {
                 s_stereo_buf[i * 2] = s_hw_buf[i];
                 s_stereo_buf[i * 2 + 1] = s_hw_buf[i];
@@ -153,11 +173,48 @@ static void voice_player_task(void* arg) {
             out_frames = read;
         }
 
+        // Apply DC offset correction to prevent humming/noise
+        for (size_t i = 0; i < out_frames; i++) {
+            int16_t left = out_samples[i * 2];
+            int16_t right = out_samples[i * 2 + 1];
+
+            // Track DC offset using low-pass filter
+            s_dc_offset = DC_CORRECTION_ALPHA * s_dc_offset + (1.0f - DC_CORRECTION_ALPHA) * (float)left;
+
+            // Remove DC offset
+            float left_f = (float)left - s_dc_offset;
+            float right_f = (float)right - s_dc_offset;
+
+            // Clamp to prevent clipping
+            if (left_f > 32767.0f) left_f = 32767.0f;
+            if (left_f < -32768.0f) left_f = -32768.0f;
+            if (right_f > 32767.0f) right_f = 32767.0f;
+            if (right_f < -32768.0f) right_f = -32768.0f;
+
+            out_samples[i * 2] = (int16_t)left_f;
+            out_samples[i * 2 + 1] = (int16_t)right_f;
+        }
+
+        for (size_t i = 0; i < out_frames; i++) {
+            float left = (float)out_samples[i * 2] * VOICE_PLAYER_GAIN;
+            float right = (float)out_samples[i * 2 + 1] * VOICE_PLAYER_GAIN;
+            
+            if (left > 32767.0f) left = 32767.0f;
+            if (left < -32768.0f) left = -32768.0f;
+            if (right > 32767.0f) right = 32767.0f;
+            if (right < -32768.0f) right = -32768.0f;
+            
+            out_samples[i * 2] = (int16_t)left;
+            out_samples[i * 2 + 1] = (int16_t)right;
+        }
+
         // Play audio
         size_t write_bytes = out_frames * VOICE_HW_CHANNELS * sizeof(int16_t);
         esp_err_t write_ret = audio_output_external_write(out_samples, write_bytes, pdMS_TO_TICKS(40));
         if (write_ret != ESP_OK) {
             ESP_LOGW(TAG, "Write failed: %s frames=%u", esp_err_to_name(write_ret), (unsigned)out_frames);
+        } else {
+            taskYIELD();
         }
     }
 
@@ -189,7 +246,7 @@ esp_err_t voice_player_init(esp_codec_dev_handle_t spk_dev, voice_player_event_c
     s_event_cb_user_data = user_data;
 
     // Initialize ring buffer
-    uint32_t sample_rate = voice_hw_codec_rate_hz();
+    uint32_t sample_rate = CONFIG_VOICE_OUTPUT_SAMPLE_RATE;
     size_t samples = sample_rate * VOICE_PLAYER_RING_MS / 1000;
     if (samples < 1024) samples = 1024;
 
@@ -211,6 +268,8 @@ void voice_player_deinit(void) {
 
     voice_player_stop();
 
+    s_dc_offset = 0.0f;
+
     if (s_ringbuf) {
         audio_ringbuf_deinit(s_ringbuf);
         s_ringbuf = NULL;
@@ -224,6 +283,11 @@ void voice_player_deinit(void) {
     if (s_stereo_buf) {
         playout_free(s_stereo_buf);
         s_stereo_buf = NULL;
+    }
+
+    if (s_rs_out_buf) {
+        playout_free(s_rs_out_buf);
+        s_rs_out_buf = NULL;
     }
 
     if (s_play_task_stack) {
@@ -261,9 +325,9 @@ esp_err_t voice_player_start(void) {
 
     // Allocate task stack
     if (s_play_task_stack == NULL) {
-        s_play_task_stack = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (s_play_task_stack == NULL) {
-            s_play_task_stack = heap_caps_malloc(4096, MALLOC_CAP_8BIT);
+        s_play_task_stack = heap_caps_malloc(8192, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s_play_task_stack == NULL) {
+        s_play_task_stack = heap_caps_malloc(8192, MALLOC_CAP_8BIT);
             if (s_play_task_stack == NULL) {
                 ESP_LOGE(TAG, "Failed to allocate task stack");
                 audio_output_external_close();
@@ -277,11 +341,12 @@ esp_err_t voice_player_start(void) {
     s_prefilled = false;
     s_last_audio_time_ms = 0;
 
-    // Create play task on CPU 1
+    /* CPU 0: keep CPU 1 for taskLVGL (BSP pins LVGL to core 1). Same-core
+     * contention starves LVGL and breaks TWDT resets in anim_timer_cb. */
     s_play_task = xTaskCreateStaticPinnedToCore(
         voice_player_task, "voice_play_v2",
-        4096 / sizeof(StackType_t), NULL,
-        5, s_play_task_stack, &s_play_task_buf, 1);
+        8192 / sizeof(StackType_t), NULL,
+        5, s_play_task_stack, &s_play_task_buf, 0);
 
     if (s_play_task == NULL) {
         ESP_LOGE(TAG, "Failed to create play task");
@@ -301,6 +366,7 @@ esp_err_t voice_player_stop(void) {
     }
 
     s_playing = false;
+    s_dc_offset = 0.0f;
 
     if (s_play_task) {
         vTaskDelay(pdMS_TO_TICKS(100));
