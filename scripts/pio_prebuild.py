@@ -376,6 +376,11 @@ STATIC_DEFAULTS = [
     "CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n",
     "CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU1=n",
     "",
+    # PM / DFS (Dynamic Frequency Scaling): CPU idles at 80 MHz, ramps to 160 MHz on load.
+    "CONFIG_PM_ENABLE=y",
+    "CONFIG_PM_DFS_IN_ISR=y",
+    "CONFIG_PM_LIGHTSLEEP_RTC_OSC_CAL_INTERVAL=30",
+    "",
 ]
 
 

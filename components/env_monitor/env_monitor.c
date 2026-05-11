@@ -30,7 +30,7 @@
 #endif
 
 #ifndef CONFIG_ENV_MONITOR_POLL_INTERVAL_SEC
-#define CONFIG_ENV_MONITOR_POLL_INTERVAL_SEC 30
+#define CONFIG_ENV_MONITOR_POLL_INTERVAL_SEC 60
 #endif
 
 #ifndef CONFIG_ENV_MONITOR_COOLDOWN_SEC
@@ -1106,10 +1106,12 @@ esp_err_t env_monitor_start(void) {
   if (s_task != NULL) {
     return ESP_OK;
   }
-  if (!iot_board_is_init()) {
-    ESP_LOGW(TAG, "board not ready");
-    return ESP_ERR_INVALID_STATE;
-  }
+  /* NOTE: iot_board_is_init() is NOT checked here on purpose.
+     The env monitor task internally calls env_hw_init() which checks
+     board readiness and retries automatically until iot_board_init()
+     succeeds.  Starting the task early lets sensor data appear on the
+     UI as soon as the board and I2C bus are ready, without depending
+     on the voice service chain. */
   s_running = true;
   memset(&s_hw, 0, sizeof(s_hw));
   memset(&s_temp_trigger, 0, sizeof(s_temp_trigger));

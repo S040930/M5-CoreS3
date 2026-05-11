@@ -137,9 +137,24 @@ static void process_sse_line(const char *line, size_t line_len, sse_ctx_t *ctx) 
     cJSON *delta = cJSON_GetObjectItemCaseSensitive(first, "delta");
     if (cJSON_IsObject(delta)) {
         cJSON *content = cJSON_GetObjectItemCaseSensitive(delta, "content");
-        if (cJSON_IsString(content) && content->valuestring && strlen(content->valuestring) > 0) {
-            if (s_callbacks.on_text_delta) {
-                s_callbacks.on_text_delta(content->valuestring, strlen(content->valuestring), s_callbacks.user_data);
+        if (s_callbacks.on_text_delta && content != NULL) {
+            if (cJSON_IsString(content) && content->valuestring && content->valuestring[0] != '\0') {
+                s_callbacks.on_text_delta(content->valuestring, strlen(content->valuestring),
+                                          s_callbacks.user_data);
+            } else if (cJSON_IsArray(content)) {
+                cJSON *part = NULL;
+                cJSON_ArrayForEach(part, content) {
+                    if (!cJSON_IsObject(part)) {
+                        continue;
+                    }
+                    cJSON *typ = cJSON_GetObjectItemCaseSensitive(part, "type");
+                    cJSON *txt = cJSON_GetObjectItemCaseSensitive(part, "text");
+                    if (cJSON_IsString(typ) && typ->valuestring && strcmp(typ->valuestring, "text") == 0 &&
+                        cJSON_IsString(txt) && txt->valuestring && txt->valuestring[0] != '\0') {
+                        s_callbacks.on_text_delta(txt->valuestring, strlen(txt->valuestring),
+                                                  s_callbacks.user_data);
+                    }
+                }
             }
         }
 
@@ -371,12 +386,26 @@ static const char *build_instructions_with_env(const char *base, char *buf, size
         written = snprintf(buf, buf_len,
                            "%s\n\n当前设备环境读数：温度%.1f°C，湿度%.1f%%，气压%.1fkPa。"
                            "请在用户询问温度、湿度或气压时，直接基于这组读数作答，"
-                           "不要泛化为默认回答。",
+                           "不要泛化为默认回答。"
+                           "\n\n音量调节说明："
+                           "当用户说\"调大音量\"、\"大声一点\"、\"音量调高\"或类似意图时，"
+                           "请直接回复\"好的，已为您调大音量\"（不要说\"我不支持\"之类的）。"
+                           "当用户说\"调小音量\"、\"小声一点\"、\"音量调低\"或类似意图时，"
+                           "请直接回复\"好的，已为您调小音量\"。"
+                           "当用户要求\"静音\"或\"关闭声音\"时请回复\"好的，已静音\"。"
+                           "每次调节幅度为3分贝，每次只调节一个单位。",
                            base, temp_c, humidity_pct, pressure_kpa);
     } else {
         written = snprintf(buf, buf_len,
                            "%s\n\n当前设备没有可用的实时环境读数。"
-                           "如果用户询问温度、湿度或气压，请明确说明当前没有可用的实时读数。",
+                           "如果用户询问温度、湿度或气压，请明确说明当前没有可用的实时读数。"
+                           "\n\n音量调节说明："
+                           "当用户说\"调大音量\"、\"大声一点\"、\"音量调高\"或类似意图时，"
+                           "请直接回复\"好的，已为您调大音量\"。"
+                           "当用户说\"调小音量\"、\"小声一点\"、\"音量调低\"或类似意图时，"
+                           "请直接回复\"好的，已为您调小音量\"。"
+                           "当用户要求\"静音\"或\"关闭声音\"时请回复\"好的，已静音\"。"
+                           "每次调节幅度为3分贝，每次只调节一个单位。",
                            base);
     }
     if (written < 0 || (size_t)written >= buf_len) {
@@ -420,6 +449,8 @@ static char *build_request_body(const char *audio_url, const char *model, const 
     cJSON_AddStringToObject(audio_part, "type", "input_audio");
     cJSON *input_audio = cJSON_AddObjectToObject(audio_part, "input_audio");
 
+    /* DashScope OpenAI-compatible Omni expects URL/base64 in "data", not "audio_url"
+     * (wrong field triggers invalid_request_error about image_url.url vs urls). */
     cJSON_AddStringToObject(input_audio, "data", audio_url);
     cJSON_AddStringToObject(input_audio, "format", "wav");
 
@@ -832,7 +863,7 @@ esp_err_t omni_client_send_audio(const int16_t *pcm_data, size_t pcm_frames,
     const char *model_raw = s_config.model[0] ? s_config.model : CONFIG_VOICE_MODEL;
     const char *voice = s_config.voice[0] ? s_config.voice : CONFIG_VOICE_OMNI_VOICE;
     const char *instructions = s_config.instructions[0] ? s_config.instructions : NULL;
-    char instructions_with_env[768];
+    char instructions_with_env[1536];
     if (instructions != NULL) {
         instructions = build_instructions_with_env(instructions, instructions_with_env,
                                                    sizeof(instructions_with_env));

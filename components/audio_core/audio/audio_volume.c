@@ -11,13 +11,15 @@ static const char *TAG = "audio_vol";
 #define NVS_NAMESPACE "airplay"
 #define NVS_KEY_VOLUME "volume_db"
 
-static float s_volume_db = -15.0f;
+static float s_volume_db = 0.0f;
 static bool s_loaded = false;
 
 static float volume_db_to_linear(float db);
 
 esp_err_t audio_volume_load(float *volume_db) {
   if (!volume_db) return ESP_ERR_INVALID_ARG;
+
+  *volume_db = s_volume_db;
 
   nvs_handle_t nvs;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);

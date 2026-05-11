@@ -1,7 +1,6 @@
 #include "screen_ui.h"
 
 #include "bsp/m5stack_core_s3.h"
-#include "env_monitor.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
@@ -63,6 +62,9 @@ typedef struct {
   lv_obj_t *mic_btn;
   lv_obj_t *mic_label;
 
+  /* Assistant reply caption (LVGL label above canvas; streaming text appended in voice_ctrl). */
+  lv_obj_t *assistant_lbl;
+
   /* Animation state */
   uint32_t anim_phase;
   float cur_eye_open;
@@ -77,10 +79,6 @@ typedef struct {
   screen_ui_voice_state_t last_voice_state;
   bool last_streaming;
 
-  float env_temp_c;
-  float env_humidity_pct;
-  float env_pressure_kpa;
-  bool env_data_valid;
 } screen_ui_ctx_t;
 
 static screen_ui_ctx_t s_ui = {0};
@@ -190,60 +188,35 @@ static void render_pixel_face(void) {
     }
   }
 
-#if CONFIG_ENV_MONITOR_ENABLE
-  /* Sensor panel (env_monitor must expose valid readings for numbers; else "--") */
-  {
-    lv_color_t env_bg = lv_color_hex(0x1a1a1a);
-    const lv_font_t *env_font = &lv_font_montserrat_14;
-
-    if (s_ui.env_data_valid) {
-      lv_color_t env_fg = lv_color_hex(0x888888);
-      ui_renderer_draw_rect(r, 4, 62, 104, 52, env_bg, 160, true);
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%.1f C", s_ui.env_temp_c);
-      ui_renderer_draw_text(r, buf, 10, 66, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
-      snprintf(buf, sizeof(buf), "%.1f%%", s_ui.env_humidity_pct);
-      ui_renderer_draw_text(r, buf, 10, 90, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
-
-      ui_renderer_draw_rect(r, 212, 62, 104, 30, env_bg, 160, true);
-      snprintf(buf, sizeof(buf), "%.1fkPa", s_ui.env_pressure_kpa);
-      ui_renderer_draw_text(r, buf, 218, 70, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
-    } else {
-      lv_color_t env_fg = lv_color_hex(0x555555);
-      ui_renderer_draw_rect(r, 4, 62, 104, 52, env_bg, 160, true);
-      ui_renderer_draw_text(r, "--", 10, 66, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
-      ui_renderer_draw_text(r, "--", 10, 90, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
-      ui_renderer_draw_rect(r, 212, 62, 104, 30, env_bg, 160, true);
-      ui_renderer_draw_text(r, "--", 218, 70, env_font, env_fg, LV_OPA_COVER, LV_TEXT_ALIGN_LEFT);
-    }
-  }
-#endif
+  /* NOTE: env sensor data display was removed. Users can query
+     temperature/humidity/pressure via voice (the env_monitor module still
+     runs and injects real-time readings into the AI system prompt). */
 }
 
 /* ========== Color helpers ========== */
 static void set_colors_for_state(screen_ui_voice_state_t state) {
   switch (state) {
   case SCREEN_UI_VOICE_STANDBY:
-    s_ui.eye_sclera_color = lv_color_hex(0x333333);
-    s_ui.mouth_color = lv_color_hex(0x1a3a2a);
-    break;
   case SCREEN_UI_VOICE_CONNECTING:
-    s_ui.eye_sclera_color = lv_color_hex(0xFFFFFF);
-    s_ui.mouth_color = lv_color_hex(0x4A90E8);
+    /* 绿色 → 就绪 */
+    s_ui.eye_sclera_color = lv_color_hex(0x333333);
+    s_ui.mouth_color = lv_color_hex(0x4CAF50);
     break;
   case SCREEN_UI_VOICE_LISTENING:
+    /* 蓝色 → 录音 */
+    s_ui.eye_sclera_color = lv_color_hex(0xFFFFFF);
+    s_ui.mouth_color = lv_color_hex(0x2196F3);
+    break;
   case SCREEN_UI_VOICE_SENDING:
-  case SCREEN_UI_VOICE_SPEAKING:
-    s_ui.eye_sclera_color = lv_color_hex(0xFFFFFF);
-    s_ui.mouth_color = lv_color_hex(0x00D4AA);
-    break;
   case SCREEN_UI_VOICE_THINKING:
+    /* 黄色 → 上传 / 处理 */
     s_ui.eye_sclera_color = lv_color_hex(0xFFFFFF);
-    s_ui.mouth_color = lv_color_hex(0xE8C547);
+    s_ui.mouth_color = lv_color_hex(0xFFC107);
     break;
-  case SCREEN_UI_VOICE_ERROR:
-    s_ui.eye_sclera_color = lv_color_hex(0xE84A4A);
-    s_ui.mouth_color = lv_color_hex(0xE84A4A);
+  case SCREEN_UI_VOICE_SPEAKING:
+    /* 红色 → 播放音频 */
+    s_ui.eye_sclera_color = lv_color_hex(0xFFFFFF);
+    s_ui.mouth_color = lv_color_hex(0xF44336);
     break;
   default:
     break;
@@ -264,25 +237,9 @@ static void anim_timer_cb(lv_timer_t *timer) {
 
   s_ui.anim_phase++;
 
-#if CONFIG_ENV_MONITOR_ENABLE
-  {
-    float prev_t = s_ui.env_temp_c;
-    float prev_h = s_ui.env_humidity_pct;
-    float prev_p = s_ui.env_pressure_kpa;
-    bool prev_valid = s_ui.env_data_valid;
-    bool valid = env_monitor_get_latest(&s_ui.env_temp_c, &s_ui.env_humidity_pct, &s_ui.env_pressure_kpa);
-    bool validity_changed = (valid != prev_valid);
-    bool values_changed =
-        valid && (fabsf(s_ui.env_temp_c - prev_t) > 0.05f || fabsf(s_ui.env_humidity_pct - prev_h) > 0.15f ||
-                  fabsf(s_ui.env_pressure_kpa - prev_p) > 0.03f);
-    if (validity_changed) {
-      s_ui.env_data_valid = valid;
-    }
-    if (validity_changed || values_changed) {
-      s_ui.render_dirty = true;
-    }
-  }
-#endif
+  /* NOTE: env sensor data polling was removed together with the display.
+     The env_monitor module continues to run in the background and feeds
+     sensor data into the voice AI prompt, so users can ask via voice. */
 
   esp_task_wdt_reset();
 
@@ -513,6 +470,15 @@ esp_err_t screen_ui_init(void) {
   lv_obj_set_style_text_color(s_ui.mic_label, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(s_ui.mic_label);
 
+  s_ui.assistant_lbl = lv_label_create(s_ui.screen);
+  lv_obj_set_width(s_ui.assistant_lbl, UI_SCREEN_WIDTH - 16);
+  lv_label_set_long_mode(s_ui.assistant_lbl, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_font(s_ui.assistant_lbl, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(s_ui.assistant_lbl, lv_color_hex(0xCCCCCC), 0);
+  lv_obj_set_pos(s_ui.assistant_lbl, 8, 108);
+  lv_label_set_text(s_ui.assistant_lbl, "");
+  lv_obj_add_flag(s_ui.assistant_lbl, LV_OBJ_FLAG_HIDDEN);
+
   /* Init animation state */
   s_ui.cur_eye_open = 1.0f;
   s_ui.cur_mouth_open = 0.0f;
@@ -618,8 +584,6 @@ void screen_ui_set_playing(bool playing) {
 void screen_ui_set_voice_state(screen_ui_voice_state_t state, const char *user_text,
                                const char *assistant_text, const char *error_text) {
   (void)user_text;
-  (void)assistant_text;
-  (void)error_text;
 
   /* Map OFF to STANDBY so face is always visible */
   if (state == SCREEN_UI_VOICE_OFF) {
@@ -636,6 +600,24 @@ void screen_ui_set_voice_state(screen_ui_voice_state_t state, const char *user_t
 
   set_colors_for_state(state);
   update_mic_button_state(state);
+
+  if (s_ui.assistant_lbl != NULL) {
+    if (error_text != NULL && error_text[0] != '\0') {
+      lv_label_set_text(s_ui.assistant_lbl, error_text);
+      lv_obj_remove_flag(s_ui.assistant_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else if (assistant_text != NULL && assistant_text[0] != '\0') {
+      lv_label_set_text(s_ui.assistant_lbl, assistant_text);
+      lv_obj_remove_flag(s_ui.assistant_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else if (assistant_text != NULL && assistant_text[0] == '\0') {
+      lv_label_set_text(s_ui.assistant_lbl, "");
+      lv_obj_add_flag(s_ui.assistant_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else if (assistant_text == NULL &&
+               (state == SCREEN_UI_VOICE_STANDBY || state == SCREEN_UI_VOICE_LISTENING ||
+                state == SCREEN_UI_VOICE_CONNECTING)) {
+      lv_label_set_text(s_ui.assistant_lbl, "");
+      lv_obj_add_flag(s_ui.assistant_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 
   bsp_display_unlock();
 }

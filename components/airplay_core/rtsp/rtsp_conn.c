@@ -20,15 +20,11 @@ rtsp_conn_t *rtsp_conn_create(void) {
     return NULL;
   }
 
-  // Load saved volume or use default
-  float saved_volume;
-  if (audio_volume_load(&saved_volume) == ESP_OK) {
-    conn->volume_db = saved_volume;
-    conn->volume_q15 = volume_db_to_q15(saved_volume);
-  } else {
-    conn->volume_db = -15.0f;
-    conn->volume_q15 = volume_db_to_q15(conn->volume_db);
-  }
+  /* Default max (0 dB); NVS overrides when present. load() always fills saved_volume when possible. */
+  float saved_volume = 0.0f;
+  (void)audio_volume_load(&saved_volume);
+  conn->volume_db = saved_volume;
+  conn->volume_q15 = volume_db_to_q15(saved_volume);
 
   conn->data_socket = -1;
   conn->control_socket = -1;

@@ -17,11 +17,17 @@ esp_err_t voice_player_stop(void);
 
 esp_err_t voice_player_feed(const int16_t* pcm_data, size_t frames, uint32_t sample_rate);
 
+esp_err_t voice_player_reserve_pcm_capacity(size_t min_pcm_samples);
+esp_err_t voice_player_feed_blocking(const int16_t *pcm_data, size_t frames, uint32_t sample_rate);
+
 bool voice_player_is_active(void);
 bool voice_player_is_buffering(void);
 size_t voice_player_available_frames(void);
 
 void voice_player_set_prebuffer_ms(uint32_t ms);
+
+/** Call when the TTS/audio HTTP stream has finished delivering chunks (before ringbuf may be empty). */
+void voice_player_mark_upstream_complete(void);
 
 #ifdef __cplusplus
 }

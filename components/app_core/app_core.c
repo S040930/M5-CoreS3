@@ -23,6 +23,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "driver/i2c_master.h"
+#include "esp_pm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -255,6 +256,11 @@ static void start_voice_services(void) {
     ESP_LOGW(TAG, "Voice requires board init: %s", esp_err_to_name(board_err));
     return;
   }
+  /* NOTE: iot_board_init() was already called in app_core_run() before the
+     env monitor was started, so the board + I2C bus are ready by the time
+     voice services are started.  The call here is kept as a safety net for
+     boards that may not have initialized I2C yet (iot_board_init() is
+     idempotent and returns ESP_OK if already initialized). */
   esp_err_t err = realtime_voice_start();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Realtime voice start failed: %s", esp_err_to_name(err));
@@ -262,16 +268,16 @@ static void start_voice_services(void) {
   }
   realtime_voice_set_enabled(CONFIG_VOICE_MODE_DEFAULT_ENABLED);
   s_voice_started = true;
-  if (env_monitor_start() != ESP_OK) {
-    ESP_LOGW(TAG, "Env monitor start skipped or failed");
-  }
 }
 
 static void stop_voice_services(void) {
   if (!s_voice_started) {
     return;
   }
-  env_monitor_stop();
+  /* NOTE: env_monitor_stop() is intentionally NOT called here.
+     Env monitor is started independently in app_core_run() and
+     runs for the entire device lifetime, so sensor data is always
+     available on the UI regardless of voice service state. */
   realtime_voice_stop();
   s_voice_started = false;
 }
@@ -401,11 +407,43 @@ void app_core_run(void) {
   esp_log_level_set("audio_dec", ESP_LOG_ERROR);
   esp_log_level_set("audio_stream", ESP_LOG_ERROR);
 
+  /* Configure DFS (Dynamic Frequency Scaling) to reduce CPU heat.
+     CPU automatically drops to 80 MHz when idle (e.g. waiting for voice/AirPlay)
+     and ramps to 240 MHz when busy.  Light sleep is NOT enabled (would break
+     WiFi and audio I2S). */
+#if CONFIG_PM_ENABLE
+  {
+    esp_pm_config_t pm_cfg = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 80,   /* APB clock floor – safe for WiFi & I2S */
+        .light_sleep_enable = false,
+    };
+    esp_err_t pm_err = esp_pm_configure(&pm_cfg);
+    if (pm_err == ESP_OK) {
+      ESP_LOGI(TAG, "DFS enabled: 80~160 MHz");
+    } else {
+      ESP_LOGW(TAG, "DFS config failed: %s", esp_err_to_name(pm_err));
+    }
+  }
+#endif
+
   if (screen_ui_init() != ESP_OK) {
     ESP_LOGW(TAG, "screen UI init failed; continuing without local display");
   } else {
     screen_ui_set_voice_ptt_callback(realtime_voice_notify_user_speech_start);
   }
+
+  /* Initialize board (I2C bus, codec, etc.) independently of voice service.
+     This must happen before env_monitor_start() so the I2C bus is ready when
+     the env monitor and auto_brightness modules attempt I2C access. */
+  esp_err_t board_err = iot_board_init();
+  if (board_err != ESP_OK) {
+    ESP_LOGW(TAG, "Board init failed: %s (env monitor will retry in task)",
+             esp_err_to_name(board_err));
+  }
+
+  /* Start auto brightness (LTR-553 ALS) after I2C bus is available.
+     Uses bsp_display_brightness_set to adjust the LCD backlight dynamically. */
   {
     i2c_master_bus_handle_t i2c_bus = NULL;
     esp_err_t ab_err = i2c_master_get_bus_handle(CONFIG_BSP_I2C_NUM, &i2c_bus);
@@ -418,6 +456,13 @@ void app_core_run(void) {
       ESP_LOGW(TAG, "I2C bus handle unavailable, auto brightness skipped");
     }
   }
+
+  /* Start env monitor independently of voice service, so sensor data is
+     available even when voice is not fully configured/started. */
+  if (env_monitor_start() != ESP_OK) {
+    ESP_LOGW(TAG, "Env monitor deferred (will retry in task)");
+  }
+
   realtime_voice_set_ui_state_cb(voice_ui_state_bridge);
   realtime_voice_set_ui_network_busy_cb(voice_ui_network_busy_bridge);
   realtime_voice_set_network_query_cb(network_query_for_voice);

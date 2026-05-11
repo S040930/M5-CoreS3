@@ -27,6 +27,7 @@ void audio_ringbuf_deinit(audio_ringbuf_t *rb);
 void audio_ringbuf_reset(audio_ringbuf_t *rb);
 size_t audio_ringbuf_avail(const audio_ringbuf_t *rb);
 size_t audio_ringbuf_free(const audio_ringbuf_t *rb);
+size_t audio_ringbuf_capacity(const audio_ringbuf_t *rb);
 size_t audio_ringbuf_push(audio_ringbuf_t *rb, const int16_t *pcm, size_t samples);
 size_t audio_ringbuf_push_quiet(audio_ringbuf_t *rb, const int16_t *pcm, size_t samples);
 size_t audio_ringbuf_pop(audio_ringbuf_t *rb, int16_t *dst, size_t max_samples);

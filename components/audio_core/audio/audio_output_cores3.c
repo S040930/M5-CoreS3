@@ -35,8 +35,8 @@ static uint32_t s_output_rate = AO_OUTPUT_RATE;
 static int s_output_mclk_multiple = 0;
 static bool s_output_open = false;
 static portMUX_TYPE s_volume_lock = portMUX_INITIALIZER_UNLOCKED;
-static float s_target_volume_db = -15.0f;
-static float s_current_volume_db = -15.0f;
+static float s_target_volume_db = VOLUME_MAX_DB;
+static float s_current_volume_db = VOLUME_MAX_DB;
 static bool s_volume_state_init = false;
 static bool s_output_muted = false;
 static int64_t s_last_ramp_update_us = 0;
@@ -359,7 +359,7 @@ esp_err_t audio_output_init(void) {
 
   portENTER_CRITICAL(&s_volume_lock);
   if (!s_volume_state_init) {
-    s_target_volume_db = -15.0f;
+    s_target_volume_db = VOLUME_MAX_DB;
     s_current_volume_db = s_target_volume_db;
     s_volume_state_init = true;
   }
@@ -621,8 +621,8 @@ esp_err_t audio_output_get_diag(audio_output_diag_t *diag) {
   diag->channel_mask = CORES3_CHANNELMASK;
   diag->mclk_multiple = s_output_mclk_multiple;
   diag->volume = -1;
-  diag->current_volume_db = -15.0f;
-  diag->target_volume_db = -15.0f;
+  diag->current_volume_db = VOLUME_MAX_DB;
+  diag->target_volume_db = VOLUME_MAX_DB;
   diag->ramping = false;
   diag->reg04 = -1;
   diag->reg05 = -1;

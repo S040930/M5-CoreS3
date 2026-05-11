@@ -86,6 +86,10 @@ size_t audio_ringbuf_free(const audio_ringbuf_t *rb) {
   return rb->cap > a + 1U ? rb->cap - a - 1U : 0;
 }
 
+size_t audio_ringbuf_capacity(const audio_ringbuf_t *rb) {
+  return (rb != NULL) ? rb->cap : 0;
+}
+
 static void audio_ringbuf_log_overflow(audio_ringbuf_t *rb, size_t dropped_now) {
   if (rb == NULL || dropped_now == 0) {
     return;

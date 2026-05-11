@@ -18,7 +18,8 @@
 #define TAG "voice_player_v2"
 #define VOICE_PLAYER_RING_MS 5000U
 #define VOICE_PLAYER_PREFILL_MS 500U
-#define SILENCE_TIMEOUT_MS 5000
+/* While Omni SSE is still open, inter-chunk gaps can exceed 5s; old silence timeout cut playback early. */
+#define UPSTREAM_STALL_ABORT_MS 120000U
 
 static bool s_initialized = false;
 static bool s_playing = false;
@@ -43,6 +44,7 @@ static StaticTask_t s_play_task_buf;
 static StackType_t* s_play_task_stack = NULL;
 
 static uint64_t s_last_audio_time_ms = 0;
+static volatile bool s_upstream_complete;
 
 #define DC_CORRECTION_ALPHA 0.995f
 static float s_dc_offset = 0.0f;
@@ -127,9 +129,12 @@ static void voice_player_task(void* arg) {
         uint64_t now = esp_timer_get_time() / 1000;
 
         if (avail == 0) {
-            // Check silence timeout
-            if (s_last_audio_time_ms > 0 && (now - s_last_audio_time_ms) > SILENCE_TIMEOUT_MS) {
-                ESP_LOGI(TAG, "Silence timeout, stopping playback");
+            if (s_upstream_complete) {
+                break;
+            }
+            if (s_last_audio_time_ms > 0 &&
+                (now - s_last_audio_time_ms) > UPSTREAM_STALL_ABORT_MS) {
+                ESP_LOGW(TAG, "upstream stall (%ums), stopping", (unsigned)UPSTREAM_STALL_ABORT_MS);
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(5));
@@ -140,6 +145,7 @@ static void voice_player_task(void* arg) {
         size_t read = audio_ringbuf_pop(s_ringbuf, s_hw_buf, to_read);
 
         if (read == 0) {
+            taskYIELD();
             continue;
         }
 
@@ -213,9 +219,9 @@ static void voice_player_task(void* arg) {
         esp_err_t write_ret = audio_output_external_write(out_samples, write_bytes, pdMS_TO_TICKS(40));
         if (write_ret != ESP_OK) {
             ESP_LOGW(TAG, "Write failed: %s frames=%u", esp_err_to_name(write_ret), (unsigned)out_frames);
-        } else {
-            taskYIELD();
         }
+        /* Always yield so IDLE0 can run (TWDT); write-fail paths used to starve CPU 0. */
+        taskYIELD();
     }
 
     ESP_LOGI(TAG, "Play task stopping");
@@ -340,6 +346,7 @@ esp_err_t voice_player_start(void) {
     s_playing = true;
     s_prefilled = false;
     s_last_audio_time_ms = 0;
+    s_upstream_complete = false;
 
     /* CPU 0: keep CPU 1 for taskLVGL (BSP pins LVGL to core 1). Same-core
      * contention starves LVGL and breaks TWDT resets in anim_timer_cb. */
@@ -360,12 +367,17 @@ esp_err_t voice_player_start(void) {
     return ESP_OK;
 }
 
+void voice_player_mark_upstream_complete(void) {
+    s_upstream_complete = true;
+}
+
 esp_err_t voice_player_stop(void) {
     if (!s_playing) {
         return ESP_OK;
     }
 
     s_playing = false;
+    s_upstream_complete = false;
     s_dc_offset = 0.0f;
 
     if (s_play_task) {
@@ -376,6 +388,65 @@ esp_err_t voice_player_stop(void) {
     // Note: audio_output cleanup and event notification happens in the play task
 
     ESP_LOGI(TAG, "Stop requested");
+    return ESP_OK;
+}
+
+esp_err_t voice_player_reserve_pcm_capacity(size_t min_pcm_samples) {
+    if (!s_initialized || s_ringbuf == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_playing) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (audio_ringbuf_capacity(s_ringbuf) >= min_pcm_samples + 1U) {
+        return ESP_OK;
+    }
+    const size_t margin = 48000;
+    const size_t cap_max = 24000u * 180u;
+    size_t want = min_pcm_samples + margin;
+    if (want < min_pcm_samples) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (want > cap_max) {
+        want = cap_max;
+    }
+    audio_ringbuf_deinit(s_ringbuf);
+    s_ringbuf = audio_ringbuf_init_named(want, "voice_play_v2");
+    if (s_ringbuf == NULL) {
+        ESP_LOGE(TAG, "reserve: ring alloc %u samples failed, restore default", (unsigned)want);
+        uint32_t sample_rate = CONFIG_VOICE_OUTPUT_SAMPLE_RATE;
+        size_t samples = sample_rate * VOICE_PLAYER_RING_MS / 1000;
+        if (samples < 1024) {
+            samples = 1024;
+        }
+        s_ringbuf = audio_ringbuf_init_named(samples, "voice_play_v2");
+        if (s_ringbuf == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "ring capacity -> %u mono samples", (unsigned)want);
+    return ESP_OK;
+}
+
+esp_err_t voice_player_feed_blocking(const int16_t *pcm_data, size_t frames, uint32_t sample_rate) {
+    if (!s_initialized || s_ringbuf == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (pcm_data == NULL || frames == 0) {
+        return ESP_OK;
+    }
+    s_current_rate = sample_rate;
+    size_t done = 0;
+    while (done < frames) {
+        size_t n = audio_ringbuf_push(s_ringbuf, pcm_data + done, frames - done);
+        done += n;
+        s_last_audio_time_ms = esp_timer_get_time() / 1000;
+        if (n == 0) {
+            taskYIELD();
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+    }
     return ESP_OK;
 }
 

@@ -10,7 +10,9 @@
 #include "voice_events.h"
 #include "audio/audio_output.h"
 #include "audio/audio_output_common.h"
+#include "audio/audio_volume.h"
 #include "resource/resource_manager.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -18,19 +20,85 @@
 #include "freertos/semphr.h"
 #include "sdkconfig.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define TAG "voice_ctrl"
 
 #define CONTROLLER_TASK_STACK 16384
 #define CONTROLLER_TASK_PRIO 4
-#define VOICE_ONESHOT_RECORD_MAX_MS 3000
-#define VOICE_SAMPLE_RATE 8000
+#define VOICE_ONESHOT_RECORD_MAX_MS 6000
+#define VOICE_RECORD_SILENCE_TIMEOUT_MS 2500
+#define VOICE_SAMPLE_RATE 44100
 #define VAD_CONSEC_FRAMES 1
 
 #define STATE_TIMEOUT_REQUESTING_MS 30000
 #define STATE_TIMEOUT_PLAYING_MS     60000
 #define AIRPLAY_POLL_INTERVAL_MS     200
+
+/* Buffer full Omni TTS clip (mono @ ~24kHz) then play once — avoids stream gaps. */
+#define OMNI_TTS_MAX_ACCUM_FRAMES (24000u * 120u)
+#define OMNI_TTS_RING_MARGIN_FRAMES 48000u
+
+static int16_t *s_tts_accum;
+static size_t s_tts_accum_frames;
+static size_t s_tts_accum_cap;
+static uint32_t s_tts_accum_rate_hz;
+
+static void tts_accum_reset(void) {
+    heap_caps_free(s_tts_accum);
+    s_tts_accum = NULL;
+    s_tts_accum_frames = 0;
+    s_tts_accum_cap = 0;
+    s_tts_accum_rate_hz = 24000;
+}
+
+static void tts_accum_append(const int16_t *pcm, size_t frames, uint32_t sample_rate) {
+    if (pcm == NULL || frames == 0) {
+        return;
+    }
+    if (s_tts_accum_frames == 0) {
+        s_tts_accum_rate_hz = sample_rate;
+    } else if (sample_rate != s_tts_accum_rate_hz) {
+        ESP_LOGW(TAG, "Omni TTS sample rate changed (%lu vs %lu), drop chunk",
+                 (unsigned long)sample_rate, (unsigned long)s_tts_accum_rate_hz);
+        return;
+    }
+    size_t next_total = s_tts_accum_frames + frames;
+    if (next_total > OMNI_TTS_MAX_ACCUM_FRAMES) {
+        ESP_LOGW(TAG, "Omni TTS buffer cap (~120s @24k), truncating");
+        frames = (s_tts_accum_frames < OMNI_TTS_MAX_ACCUM_FRAMES)
+                     ? (OMNI_TTS_MAX_ACCUM_FRAMES - s_tts_accum_frames)
+                     : 0;
+        next_total = s_tts_accum_frames + frames;
+        if (frames == 0) {
+            return;
+        }
+    }
+    if (next_total > s_tts_accum_cap) {
+        size_t new_cap = s_tts_accum_cap ? s_tts_accum_cap : 8192;
+        while (new_cap < next_total) {
+            new_cap *= 2;
+        }
+        if (new_cap > OMNI_TTS_MAX_ACCUM_FRAMES) {
+            new_cap = OMNI_TTS_MAX_ACCUM_FRAMES;
+        }
+        int16_t *nb =
+            (int16_t *)heap_caps_realloc(s_tts_accum, new_cap * sizeof(int16_t),
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (nb == NULL) {
+            nb = (int16_t *)realloc(s_tts_accum, new_cap * sizeof(int16_t));
+        }
+        if (nb == NULL) {
+            ESP_LOGE(TAG, "tts accum realloc failed");
+            return;
+        }
+        s_tts_accum = nb;
+        s_tts_accum_cap = new_cap;
+    }
+    memcpy(s_tts_accum + s_tts_accum_frames, pcm, frames * sizeof(int16_t));
+    s_tts_accum_frames += frames;
+}
 
 extern voice_ui_state_cb_t realtime_voice_get_ui_state_cb(void);
 extern voice_ui_network_busy_cb_t realtime_voice_get_ui_network_busy_cb(void);
@@ -72,12 +140,11 @@ static struct {
     bool vad_active_last;
 
     char last_user[64];
-    char last_assistant[256];
+    char last_assistant[512];
 
     bool user_speech_notified;
     uint64_t state_enter_ms;
     SemaphoreHandle_t state_lock;
-    bool player_started;
 } s = {0};
 
 static void set_ui_state(int state, const char* user, const char* assistant, const char* error) {
@@ -177,40 +244,118 @@ static void player_event_cb(voice_player_event_type_t event, void* user_data) {
 
 static void omni_on_audio_delta(const int16_t *pcm, size_t frames, uint32_t sample_rate, void *user_data) {
     (void)user_data;
-    if (!s.player_started) {
-        s.player_started = true;
-        esp_err_t player_err = voice_player_start();
-        if (player_err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start voice player: %s", esp_err_to_name(player_err));
-            return;
-        }
-        s.state = CTRL_STATE_PLAYING;
-        s.state_enter_ms = esp_timer_get_time() / 1000;
-        set_ui_state(REALTIME_VOICE_STATE_SPEAKING, s.last_user, NULL, NULL);
-        ESP_LOGI(TAG, "Player started on first audio chunk");
+    tts_accum_append(pcm, frames, sample_rate);
+}
+
+static void handle_volume_command(const char *text) {
+    if (text == NULL || text[0] == '\0') return;
+
+    float current_vol = 0.0f;
+    audio_volume_get(&current_vol);
+    bool adjusted = false;
+
+    /* Detect volume up intent (Chinese patterns) */
+    if (strstr(text, "调大") || strstr(text, "大声") ||
+        strstr(text, "音量高") || strstr(text, "音量提高") ||
+        strstr(text, "声音大")) {
+        float new_vol = current_vol + 3.0f;
+        if (new_vol > 0.0f) new_vol = 0.0f;
+        audio_volume_save(new_vol);
+        ESP_LOGI(TAG, "volume up via voice: %.1f -> %.1f dB", current_vol, new_vol);
+        adjusted = true;
     }
-    voice_player_feed(pcm, frames, sample_rate);
+    /* Detect volume down intent (Chinese patterns) */
+    else if (strstr(text, "调小") || strstr(text, "小声") ||
+             strstr(text, "音量低") || strstr(text, "音量降低") ||
+             strstr(text, "声音小")) {
+        float new_vol = current_vol - 3.0f;
+        if (new_vol < -30.0f) new_vol = -30.0f;
+        audio_volume_save(new_vol);
+        ESP_LOGI(TAG, "volume down via voice: %.1f -> %.1f dB", current_vol, new_vol);
+        adjusted = true;
+    }
+    /* Detect mute intent */
+    else if (strstr(text, "静音") || strstr(text, "关闭声音") ||
+             strstr(text, "mute") || strstr(text, "Mute")) {
+        audio_volume_save(-30.0f);
+        ESP_LOGI(TAG, "volume muted via voice: %.1f -> -30.0 dB", current_vol);
+        adjusted = true;
+    }
+
+    if (adjusted) {
+        /* Ensure the audio pipeline is adjusted for the new volume immediately */
+        audio_output_set_target_volume_db(current_vol > 0.0f ? 0.0f :
+                                           current_vol < -30.0f ? -30.0f : current_vol);
+    }
 }
 
 static void omni_on_text_delta(const char *text, size_t len, void *user_data) {
     (void)user_data;
     if (len > 0 && text != NULL) {
-        size_t copy = len < sizeof(s.last_assistant) - 1 ? len : sizeof(s.last_assistant) - 1;
-        memcpy(s.last_assistant, text, copy);
-        s.last_assistant[copy] = '\0';
-        ESP_LOGI(TAG, "text delta: %.*s", (int)len, text);
+        /* Check and handle volume commands embedded in the AI text response */
+        handle_volume_command(text);
+
+        /* SSE sends incremental string deltas; must append, not overwrite. */
+        size_t cur = strnlen(s.last_assistant, sizeof(s.last_assistant));
+        size_t room = (cur < sizeof(s.last_assistant) - 1) ? (sizeof(s.last_assistant) - 1 - cur) : 0;
+        if (room > 0) {
+            size_t copy = len < room ? len : room;
+            memcpy(s.last_assistant + cur, text, copy);
+            s.last_assistant[cur + copy] = '\0';
+        }
+        ESP_LOGD(TAG, "text delta: %.*s", (int)len, text);
+        if (s.state == CTRL_STATE_REQUESTING) {
+            set_ui_state(REALTIME_VOICE_STATE_THINKING, s.last_user, s.last_assistant, NULL);
+        } else if (s.state == CTRL_STATE_PLAYING) {
+            set_ui_state(REALTIME_VOICE_STATE_SPEAKING, s.last_user, s.last_assistant, NULL);
+        }
     }
 }
 
 static void omni_on_response_done(void *user_data) {
     (void)user_data;
-    ESP_LOGI(TAG, "Omni response done");
-    s.player_started = false;
+    ESP_LOGI(TAG, "Omni response done (assistant text): %s",
+             s.last_assistant[0] ? s.last_assistant : "(none)");
+
+    if (s_tts_accum_frames > 0 && s_tts_accum != NULL) {
+        ESP_LOGI(TAG, "TTS buffered playback: %u frames @ %lu Hz",
+                 (unsigned)s_tts_accum_frames, (unsigned long)s_tts_accum_rate_hz);
+        esp_err_t res =
+            voice_player_reserve_pcm_capacity(s_tts_accum_frames + OMNI_TTS_RING_MARGIN_FRAMES);
+        if (res != ESP_OK) {
+            ESP_LOGE(TAG, "voice_player_reserve_pcm_capacity failed: %s", esp_err_to_name(res));
+            tts_accum_reset();
+            s.state = CTRL_STATE_IDLE;
+            s.state_enter_ms = esp_timer_get_time() / 1000;
+            set_ui_state(REALTIME_VOICE_STATE_ERROR, NULL, NULL, "Playback buffer");
+            return;
+        }
+        esp_err_t err = voice_player_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "voice_player_start failed: %s", esp_err_to_name(err));
+            tts_accum_reset();
+            s.state = CTRL_STATE_IDLE;
+            s.state_enter_ms = esp_timer_get_time() / 1000;
+            set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
+            return;
+        }
+        voice_player_feed_blocking(s_tts_accum, s_tts_accum_frames, s_tts_accum_rate_hz);
+        voice_player_mark_upstream_complete();
+        s.state = CTRL_STATE_PLAYING;
+        s.state_enter_ms = esp_timer_get_time() / 1000;
+        set_ui_state(REALTIME_VOICE_STATE_SPEAKING, s.last_user, s.last_assistant, NULL);
+        tts_accum_reset();
+    } else {
+        s.state = CTRL_STATE_IDLE;
+        s.state_enter_ms = esp_timer_get_time() / 1000;
+        set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
+    }
 }
 
 static void omni_on_error(esp_err_t err, const char *message, void *user_data) {
     (void)user_data;
     ESP_LOGE(TAG, "Omni error: %s (%s)", message ? message : "unknown", esp_err_to_name(err));
+    tts_accum_reset();
 }
 
 static void log_stack_watermark(const char* reason) {
@@ -294,17 +439,9 @@ static void controller_task(void* arg) {
             voice_frontend_v2_resume();
         }
 
-#if !CONFIG_VOICE_ACTIVATION_PHRASE_ENABLE
-        if (!s.armed && !s.recording) {
-            s.armed = true;
-            s.recording = true;
-            s.record_pos = 0;
-            s.record_start_ms = esp_timer_get_time() / 1000;
-            s.vad_hit_count = 0;
-            snprintf(s.last_user, sizeof(s.last_user), "%s", "[recording]");
-            set_ui_state(REALTIME_VOICE_STATE_LISTENING, s.last_user, NULL, NULL);
-        }
-#endif
+        /* PTT-only mode: recording is triggered by screen tap
+           (voice_controller_notify_user_speech_start) which sets
+           s.user_speech_notified = true, handled below. */
 
         if (s.user_speech_notified) {
             s.user_speech_notified = false;
@@ -317,7 +454,7 @@ static void controller_task(void* arg) {
             uint64_t elapsed = now - s.record_start_ms;
 
             bool should_end = (elapsed > VOICE_ONESHOT_RECORD_MAX_MS) ||
-                            (s.vad_hit_count == 0 && elapsed > 1500);
+                            (s.vad_hit_count == 0 && elapsed > VOICE_RECORD_SILENCE_TIMEOUT_MS);
 
             if (should_end && s.record_pos > 0) {
                 ESP_LOGI(TAG, "Recording ended, %u frames", s.record_pos);
@@ -336,6 +473,9 @@ static void controller_task(void* arg) {
                 set_ui_state(REALTIME_VOICE_STATE_THINKING, s.last_user, NULL, NULL);
                 notify_network_busy(true);
 
+                s.last_assistant[0] = '\0';
+                tts_accum_reset();
+
                 voice_audio_request_t req = {
                     .pcm_data = s.record_buf,
                     .pcm_frames = s.record_pos,
@@ -350,6 +490,7 @@ static void controller_task(void* arg) {
 
                 if (err != ESP_OK) {
                     ESP_LOGE(TAG, "Omni request failed: %s", esp_err_to_name(err));
+                    tts_accum_reset();
                     set_ui_state(REALTIME_VOICE_STATE_ERROR, NULL, NULL, "API request failed");
                     voice_player_stop();
                     s.state = CTRL_STATE_IDLE;
@@ -379,8 +520,8 @@ static void controller_task(void* arg) {
             s.interrupt_requested = false;
             if (s.state == CTRL_STATE_PLAYING || s.state == CTRL_STATE_REQUESTING) {
                 ESP_LOGI(TAG, "Interrupting response");
+                tts_accum_reset();
                 voice_player_stop();
-                s.player_started = false;
                 s.state = CTRL_STATE_IDLE;
                 s.state_enter_ms = esp_timer_get_time() / 1000;
                 set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
@@ -393,8 +534,8 @@ static void controller_task(void* arg) {
             ESP_LOGE(TAG, "REQUESTING state timeout (%llums > %dms), aborting",
                      (unsigned long long)state_elapsed, STATE_TIMEOUT_REQUESTING_MS);
             omni_client_deinit();
+            tts_accum_reset();
             voice_player_stop();
-            s.player_started = false;
             s.state = CTRL_STATE_IDLE;
             s.state_enter_ms = now_ms;
             s.record_pos = 0;
@@ -405,7 +546,6 @@ static void controller_task(void* arg) {
             ESP_LOGW(TAG, "PLAYING state timeout (%llums > %dms), stopping",
                      (unsigned long long)state_elapsed, STATE_TIMEOUT_PLAYING_MS);
             voice_player_stop();
-            s.player_started = false;
             s.state = CTRL_STATE_IDLE;
             s.state_enter_ms = now_ms;
             set_ui_state(REALTIME_VOICE_STATE_STANDBY, NULL, NULL, NULL);
@@ -422,6 +562,7 @@ static void controller_task(void* arg) {
 
     voice_frontend_v2_stop();
     voice_frontend_v2_deinit();
+    tts_accum_reset();
     voice_player_stop();
     voice_player_deinit();
     omni_client_deinit();
@@ -606,6 +747,7 @@ void voice_controller_reset_session(void) {
     s.vad_hit_count = 0;
     s.last_user[0] = '\0';
     s.last_assistant[0] = '\0';
+    tts_accum_reset();
 }
 
 esp_err_t voice_controller_speak_text(const char* text) {

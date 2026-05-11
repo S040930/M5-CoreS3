@@ -8,7 +8,7 @@
 
 #define TAG "auto_bright"
 
-#define POLL_INTERVAL_MS       2000
+#define POLL_INTERVAL_MS       10000
 #define OVERRIDE_PAUSE_MS      30000
 #define BRIGHTNESS_HYSTERESIS  2
 #define SMOOTH_FACTOR_NUM      1
